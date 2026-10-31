@@ -1,0 +1,77 @@
+import { z } from "zod";
+
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORT_LEVELS)[number];
+export const effortRank = (e: Effort) => EFFORT_LEVELS.indexOf(e);
+
+export const TASK_TYPES = [
+  "ask",
+  "explain_more",
+  "change",
+  "review",
+  "fix",
+  "advise",
+  "plan",
+  "retry_high",
+  "overnight_review",
+  "chore",
+] as const;
+export type TaskType = (typeof TASK_TYPES)[number];
+
+export const TaskProfileSchema = z.strictObject({
+  model: z.string(),
+  effort: z.enum(EFFORT_LEVELS),
+  maxOutputTokens: z.number().int().positive(),
+  /** Task budget in tokens (beta). null means no task budget is sent. */
+  taskBudgetTokens: z.number().int().min(20_000).nullable(),
+  /** Adaptive thinking with progress notes ("updates" display). */
+  thinkingUpdates: z.boolean(),
+  /** Server-side fallback for refused requests. */
+  refusalFallback: z.boolean(),
+  /** "live" turns go through /agent/turn; "batch" only through /batches (phase 3). */
+  mode: z.enum(["live", "batch"]),
+});
+export type TaskProfile = z.infer<typeof TaskProfileSchema>;
+
+/** Prices in US dollars per million tokens, which is the same number as micro dollars per token. */
+export const ModelPriceSchema = z.strictObject({
+  input: z.number().nonnegative(),
+  output: z.number().nonnegative(),
+  cacheWrite5m: z.number().nonnegative(),
+  cacheWrite1h: z.number().nonnegative(),
+  cacheRead: z.number().nonnegative(),
+});
+export type ModelPrice = z.infer<typeof ModelPriceSchema>;
+
+export const PlanSchema = z.strictObject({
+  name: z.string(),
+  monthlyAllowanceMicros: z.number().int().nonnegative(),
+});
+
+export const ConfigDocSchema = z.strictObject({
+  taskProfiles: z.record(z.enum(TASK_TYPES), TaskProfileSchema),
+  prices: z.record(z.string(), ModelPriceSchema),
+  plans: z.record(z.string(), PlanSchema),
+  /**
+   * Allowed tools per task type: tool name -> sha256 of the canonical tool
+   * schema (see src/proxy/toolHash.ts). A task type with no entry here accepts
+   * any custom tool until `enforceToolAllowlist` is turned on.
+   */
+  toolAllowlist: z.record(z.string(), z.record(z.string(), z.string())),
+  limits: z.strictObject({
+    maxTurnsPerRun: z.number().int().positive(),
+    maxCostPerRunMicros: z.number().int().positive(),
+    maxCacheBreakpoints: z.number().int().nonnegative(),
+    maxImages: z.number().int().nonnegative(),
+    maxBodyBytes: z.number().int().positive(),
+    allowanceWarningRatio: z.number().min(0).max(1),
+    // Phase 2 values, served now so the app can read them.
+    turnsPerMinute: z.number().int().positive(),
+    concurrentRuns: z.number().int().positive(),
+    signInsPerHourPerIp: z.number().int().positive(),
+  }),
+  minAppVersion: z.string(),
+  features: z.record(z.string(), z.boolean()),
+  enforceToolAllowlist: z.boolean(),
+});
+export type ConfigDoc = z.infer<typeof ConfigDocSchema>;
