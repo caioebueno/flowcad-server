@@ -5,7 +5,7 @@ Anthropic key, signs people in with Apple, sets the model and limits for each ta
 type, streams agent turns through to Claude, and records what every turn cost.
 It stores no prompts, replies, CAD files or project content.
 
-TypeScript on Node 22, [Hono](https://hono.dev), Postgres, hosted on Fly.io.
+TypeScript on Node 22, [Hono](https://hono.dev), Postgres, hosted on Railway.
 
 ## Status
 
@@ -40,19 +40,25 @@ Tests need a Postgres database they can wipe:
 TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/keel_test npm test
 ```
 
-## Deploying to Fly.io
+## Deploying to Railway
 
-```sh
-fly launch --no-deploy          # uses fly.toml; pick the region
-fly postgres create             # or use Neon and set DATABASE_URL
-fly postgres attach <pg-app>
-fly secrets set ANTHROPIC_API_KEY=... ACCESS_TOKEN_SECRET=$(openssl rand -hex 32) \
-  PROJECT_HASH_SALT=$(openssl rand -hex 16) APPLE_CLIENT_ID=<bundle id>
-fly deploy                      # runs migrations as the release command
-fly scale count 2
-```
+`railway.json` holds the deploy settings: it builds the Dockerfile, runs migrations as
+the pre-deploy command, health checks `/v1/health`, runs two replicas, and gives
+in-flight streams 300 seconds to finish when a deploy replaces an instance.
 
-Use a key from a dedicated Anthropic workspace with a spend limit set on it.
+1. Create a Railway project, add a **Postgres** service, and add a service from this repo.
+2. On the app service, set these variables:
+   - `DATABASE_URL` = `${{Postgres.DATABASE_URL}}` (the private URL, no SSL needed)
+   - `ANTHROPIC_API_KEY` from Keel's dedicated Anthropic workspace, with a spend limit set on it
+   - `ACCESS_TOKEN_SECRET` = output of `openssl rand -hex 32`
+   - `PROJECT_HASH_SALT` = output of `openssl rand -hex 16` (never change it once set)
+   - `APPLE_CLIENT_ID` = the Mac app's bundle id
+   - `NODE_ENV` = `production`
+3. Generate a public domain under the service's Networking settings, or attach `api.keel.app`.
+4. Every push to the default branch deploys. Railway sets `PORT` itself.
+
+Agent turns stream for several minutes at high effort. Check Railway's current limit
+on HTTP request duration before raising any profile above `high`.
 
 ## How a turn works
 

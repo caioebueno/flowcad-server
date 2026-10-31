@@ -28,8 +28,9 @@ const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, 
   log.info("listening", { port: info.port }),
 );
 
-// Fly sends SIGINT/SIGTERM on deploy. Stop taking new connections and give
-// streams in flight time to finish (fly.toml kill_timeout is 300s).
+// Railway sends SIGTERM when a deploy replaces this instance. Stop taking new
+// connections and give streams in flight time to finish (railway.json sets
+// drainingSeconds to 300).
 let closing = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
