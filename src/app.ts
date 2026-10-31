@@ -1,0 +1,67 @@
+import { Hono } from "hono";
+import { secureHeaders } from "hono/secure-headers";
+import { requestId } from "hono/request-id";
+import type { AppEnv, Deps } from "./deps.js";
+import { ApiError } from "./errors.js";
+import { authRoutes } from "./auth/routes.js";
+import { requireAppVersion, requireAuth } from "./auth/middleware.js";
+import { proxyRoutes } from "./proxy/routes.js";
+import { accountRoutes } from "./ledger/routes.js";
+import { log } from "./logger.js";
+
+export function createApp(deps: Deps) {
+  const app = new Hono<AppEnv>();
+  app.use(secureHeaders());
+  app.use(requestId());
+
+  // Access log: method, route, status and time only. Never bodies.
+  app.use(async (c, next) => {
+    const started = Date.now();
+    await next();
+    log.info("request", {
+      id: c.get("requestId"),
+      method: c.req.method,
+      path: c.req.routePath,
+      status: c.res.status,
+      ms: Date.now() - started,
+    });
+  });
+
+  app.onError((err, c) => {
+    if (err instanceof ApiError) {
+      if (err.status === 429) c.header("Retry-After", String(err.details?.retryAfter ?? 30));
+      return c.json(err.toJSON(), err.status);
+    }
+    log.error("unhandled", { id: c.get("requestId"), path: c.req.routePath, err: err.name });
+    return c.json(new ApiError(500, "internal", "Something went wrong").toJSON(), 500);
+  });
+  app.notFound((c) => c.json(new ApiError(404, "not_found", "Not found").toJSON(), 404));
+
+  const v1 = new Hono<AppEnv>();
+
+  v1.get("/health", async (c) => {
+    await deps.sql`select 1`;
+    return c.json({ ok: true });
+  });
+
+  v1.use("*", requireAppVersion(deps));
+  v1.route("/auth", authRoutes(deps));
+
+  v1.get("/config", async (c) => {
+    const config = await deps.config.current();
+    c.header("ETag", config.etag);
+    c.header("Cache-Control", "private, max-age=3600");
+    if (c.req.header("if-none-match") === config.etag) return c.body(null, 304);
+    const { toolAllowlist, ...doc } = config.doc;
+    return c.json({ version: config.version, ...doc });
+  });
+
+  const authed = new Hono<AppEnv>();
+  authed.use("*", requireAuth(deps));
+  authed.route("/agent", proxyRoutes(deps));
+  authed.route("/", accountRoutes(deps));
+  v1.route("/", authed);
+
+  app.route("/v1", v1);
+  return app;
+}
