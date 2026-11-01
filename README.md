@@ -58,7 +58,7 @@ TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/keel_test npm test
 ## Deploying to Railway
 
 `railway.json` holds the deploy settings: it builds the Dockerfile, runs migrations as
-the pre-deploy command, health checks `/v1/health`, runs two replicas, and gives
+the pre-deploy command (the server also runs any missing migrations when it starts, under a lock), health checks `/v1/health`, runs two replicas, and gives
 in-flight streams 300 seconds to finish when a deploy replaces an instance.
 
 1. Create a Railway project, add a **Postgres** service, and add a service from this repo.
