@@ -5,6 +5,8 @@ export interface AppleIdentity {
   /** Apple's stable user id (`sub`), unique per developer team. */
   userId: string;
   email: string | null;
+  /** Apple's `email_verified` claim. Only a verified email links to an email account. */
+  emailVerified: boolean;
 }
 
 export interface AppleIdentityVerifier {
@@ -41,7 +43,8 @@ export function appleVerifier(clientId: string, keys: JWTVerifyGetKey = createRe
         if (payload.nonce !== expected) throw new IdentityTokenError("Identity token nonce mismatch");
       }
       const email = typeof payload.email === "string" ? payload.email : null;
-      return { userId: payload.sub, email };
+      const emailVerified = payload.email_verified === true || payload.email_verified === "true";
+      return { userId: payload.sub, email, emailVerified };
     },
   };
 }

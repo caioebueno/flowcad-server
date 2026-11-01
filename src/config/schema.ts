@@ -45,6 +45,8 @@ export type ModelPrice = z.infer<typeof ModelPriceSchema>;
 
 export const PlanSchema = z.strictObject({
   name: z.string(),
+  /** "pro" plans can use the AI; "free" plans get 403 plan_required. */
+  tier: z.enum(["free", "pro"]),
   monthlyAllowanceMicros: z.number().int().nonnegative(),
 });
 
@@ -69,6 +71,10 @@ export const ConfigDocSchema = z.strictObject({
     turnsPerMinute: z.number().int().positive(),
     concurrentRuns: z.number().int().positive(),
     signInsPerHourPerIp: z.number().int().positive(),
+  }),
+  billing: z.strictObject({
+    /** Free Pro trial length, given once per account through Stripe Checkout. */
+    trialDays: z.number().int().min(0).max(90),
   }),
   minAppVersion: z.string(),
   features: z.record(z.string(), z.boolean()),

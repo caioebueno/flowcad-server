@@ -4,6 +4,7 @@ import type { AppEnv, Deps } from "../deps.js";
 import { ApiError } from "../errors.js";
 import { monthOf, monthUsedMicros, projectHash } from "./ledger.js";
 import { revokeDevice } from "../auth/tokens.js";
+import { entitlementFor } from "../billing/entitlement.js";
 
 const percent = (used: number, limit: number) => (limit <= 0 ? 100 : Math.round((used / limit) * 1000) / 10);
 
@@ -25,15 +26,19 @@ export function accountRoutes(deps: Deps) {
     const plan = await deps.plans.planFor(accountId, doc);
     const used = await monthUsedMicros(deps.sql, accountId);
     const month = monthOf();
-    const [account] = await deps.sql<{ email_relay: string | null; created_at: Date; status: string }[]>`
-      select email_relay, created_at, status from accounts where id = ${accountId}`;
+    const [account] = await deps.sql<
+      { email: string | null; email_relay: string | null; apple_user_id: string | null; created_at: Date; status: string }[]
+    >`select email, email_relay, apple_user_id, created_at, status from accounts where id = ${accountId}`;
+    const entitlement = await entitlementFor(deps.sql, accountId, doc);
     const usedPercent = percent(used, plan.monthlyAllowanceMicros);
     return c.json({
       id: accountId,
-      email: account?.email_relay ?? null,
+      email: account?.email ?? account?.email_relay ?? null,
+      signInMethods: [...(account?.apple_user_id ? ["apple"] : []), ...(account?.email ? ["email"] : [])],
       status: account?.status,
       createdAt: account?.created_at.toISOString(),
-      plan: { id: plan.id, name: plan.name },
+      plan: { id: plan.id, name: plan.name, tier: plan.tier },
+      entitlement,
       allowance: {
         periodStart: new Date(`${month}T00:00:00Z`).toISOString(),
         periodEnd: nextMonth(month),

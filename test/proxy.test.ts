@@ -158,7 +158,7 @@ describe("POST /agent/turn", () => {
   });
 
   it("warns at 80% of the allowance and returns 402 at 100%", async () => {
-    const config = { ...DEFAULT_CONFIG, plans: { beta: { name: "Tiny", monthlyAllowanceMicros: 100_000 } } };
+    const config = { ...DEFAULT_CONFIG, plans: { ...DEFAULT_CONFIG.plans, beta: { name: "Tiny", tier: "pro" as const, monthlyAllowanceMicros: 100_000 } } };
     const { app, upstream } = makeApp({ config });
     upstream.events = textReply("x", { input: 0, output: 4_500 }); // 90,000 micros
     const s = await signIn(app);
