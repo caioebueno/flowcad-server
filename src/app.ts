@@ -9,6 +9,10 @@ import { requireAppVersion, requireAuth } from "./auth/middleware.js";
 import { proxyRoutes } from "./proxy/routes.js";
 import { accountRoutes } from "./ledger/routes.js";
 import { log } from "./logger.js";
+import { appliedMigrations } from "./db/index.js";
+
+/** Bump when adding a file to migrations/. The health check fails until all are applied. */
+export const EXPECTED_MIGRATIONS = 2;
 
 export function createApp(deps: Deps) {
   const app = new Hono<AppEnv>();
@@ -42,7 +46,10 @@ export function createApp(deps: Deps) {
 
   v1.get("/health", async (c) => {
     await deps.sql`select 1`;
-    return c.json({ ok: true });
+    const migrations = await appliedMigrations(deps.sql);
+    // Unhealthy until the schema is in place, so a deploy without it never goes live.
+    const ok = migrations.length >= EXPECTED_MIGRATIONS;
+    return c.json({ ok, migrations: migrations.length }, ok ? 200 : 503);
   });
 
   // Stripe and browsers call these, so no app version check and no token.

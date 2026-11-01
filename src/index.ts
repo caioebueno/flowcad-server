@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import { loadEnv } from "./env.js";
-import { connect } from "./db/index.js";
+import { connect, migrate } from "./db/index.js";
 import { createApp } from "./app.js";
 import { appleVerifier } from "./auth/apple.js";
 import { attestationDisabled, attestationNotImplemented } from "./auth/attest.js";
@@ -15,6 +15,16 @@ import { StripeGateway } from "./billing/stripe.js";
 
 const env = loadEnv();
 const sql = connect(env.DATABASE_URL);
+
+// Migrate on boot so the schema never depends on the host running a
+// pre-deploy step. A failure stops the process, so the deploy fails visibly.
+try {
+  const ran = await migrate(sql);
+  log.info("migrations", { applied: ran.join(",") || "none" });
+} catch (err) {
+  log.error("migration_failed", { err: (err as Error).message });
+  process.exit(1);
+}
 
 const billing =
   env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET
