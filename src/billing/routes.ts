@@ -207,8 +207,19 @@ export function billingRoutes(deps: Deps) {
     const { accountId } = c.get("auth");
     const { doc } = await deps.config.current();
     const entitlement = await entitlementFor(deps.sql, accountId, doc);
-    const prices = deps.billing ? await deps.billing.prices() : [];
-    const pack = deps.billing ? await deps.billing.packPrice() : null;
+    // A Stripe setup problem (wrong price id, key from the other mode) shouldn't break the
+    // upgrade sheet: it shows billing as unavailable and the log says what Stripe answered.
+    const fromStripe = async <T>(what: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+      try {
+        return await fn();
+      } catch (err) {
+        const e = err as { type?: string; code?: string; message?: string };
+        log.error("stripe_price_lookup_failed", { what, type: e.type ?? null, code: e.code ?? null, message: e.message ?? null });
+        return fallback;
+      }
+    };
+    const prices = deps.billing ? await fromStripe("plan_prices", () => deps.billing!.prices(), []) : [];
+    const pack = deps.billing ? await fromStripe("pack_price", () => deps.billing!.packPrice(), null) : null;
     return c.json({
       plans: [
         { id: "free", name: doc.plans.free?.name ?? "Free", prices: [] },
