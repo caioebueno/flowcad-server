@@ -3,7 +3,8 @@ import { secureHeaders } from "hono/secure-headers";
 import { requestId } from "hono/request-id";
 import type { AppEnv, Deps } from "./deps.js";
 import { ApiError } from "./errors.js";
-import { authRoutes } from "./auth/routes.js";
+import { authRoutes, linkEmailRoutes } from "./auth/routes.js";
+import { billingPublicRoutes, billingRoutes } from "./billing/routes.js";
 import { requireAppVersion, requireAuth } from "./auth/middleware.js";
 import { proxyRoutes } from "./proxy/routes.js";
 import { accountRoutes } from "./ledger/routes.js";
@@ -44,6 +45,9 @@ export function createApp(deps: Deps) {
     return c.json({ ok: true });
   });
 
+  // Stripe and browsers call these, so no app version check and no token.
+  v1.route("/billing", billingPublicRoutes(deps));
+
   v1.use("*", requireAppVersion(deps));
   v1.route("/auth", authRoutes(deps));
 
@@ -59,6 +63,8 @@ export function createApp(deps: Deps) {
   const authed = new Hono<AppEnv>();
   authed.use("*", requireAuth(deps));
   authed.route("/agent", proxyRoutes(deps));
+  authed.route("/billing", billingRoutes(deps));
+  authed.route("/account", linkEmailRoutes(deps));
   authed.route("/", accountRoutes(deps));
   v1.route("/", authed);
 

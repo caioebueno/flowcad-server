@@ -11,6 +11,10 @@ import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import type { ConfigDoc } from "../src/config/schema.js";
 import { ConfigPlanProvider } from "../src/billing/plans.js";
 import type { StreamEvent, Upstream, UpstreamParams } from "../src/proxy/upstream.js";
+import { EmailCodes } from "../src/auth/emailCodes.js";
+import type { Mailer } from "../src/auth/mailer.js";
+import type { BillingGateway, CheckoutInput } from "../src/billing/stripe.js";
+import Stripe from "stripe";
 
 export const CLIENT_ID = "app.keel.mac";
 let sql: Sql | null = null;
@@ -19,9 +23,12 @@ export const db = () => (sql ??= connect(process.env.TEST_DATABASE_URL!, { max: 
 const { publicKey, privateKey } = await generateKeyPair("RS256");
 const jwks = createLocalJWKSet({ keys: [{ ...(await exportJWK(publicKey)), kid: "k1", alg: "RS256" }] });
 
-export async function appleToken(sub: string, opts: { aud?: string; nonce?: string; email?: string } = {}) {
+export async function appleToken(
+  sub: string,
+  opts: { aud?: string; nonce?: string; email?: string; emailVerified?: boolean } = {},
+) {
   return new SignJWT({
-    ...(opts.email ? { email: opts.email } : {}),
+    ...(opts.email ? { email: opts.email, email_verified: opts.emailVerified ?? true } : {}),
     ...(opts.nonce ? { nonce: createHash("sha256").update(opts.nonce).digest("hex") } : {}),
   })
     .setProtectedHeader({ alg: "RS256", kid: "k1" })
@@ -88,8 +95,66 @@ export function textReply(
   ] as unknown as StreamEvent[];
 }
 
-export function makeApp(opts: { config?: ConfigDoc; upstream?: FakeUpstream } = {}) {
+/** Keeps the last code mailed to each address. */
+export class FakeMailer implements Mailer {
+  codes = new Map<string, string>();
+  fail = false;
+  async sendSignInCode({ to, code }: { to: string; code: string }) {
+    if (this.fail) throw new Error("mail down");
+    this.codes.set(to, code);
+  }
+}
+
+export const WEBHOOK_SECRET = "whsec_test_secret";
+const stripeForSigning = new Stripe("sk_test_dummy");
+
+/** Stripe stand-in: records calls, serves subscriptions from a map, verifies webhooks with the real SDK. */
+export class FakeBilling implements BillingGateway {
+  customers: { accountId: string; email: string | null }[] = [];
+  checkouts: CheckoutInput[] = [];
+  subscriptions = new Map<string, Stripe.Subscription>();
+  priceFor(interval: "month" | "year") {
+    return interval === "month" ? "price_month" : "price_year";
+  }
+  async prices() {
+    return [
+      { interval: "month" as const, priceId: "price_month", unitAmount: 2000, currency: "usd" },
+      { interval: "year" as const, priceId: "price_year", unitAmount: 19200, currency: "usd" },
+    ];
+  }
+  async createCustomer(input: { accountId: string; email: string | null }) {
+    this.customers.push(input);
+    return `cus_${this.customers.length}_${input.accountId.slice(0, 8)}`;
+  }
+  async createCheckout(input: CheckoutInput) {
+    this.checkouts.push(input);
+    return "https://checkout.stripe.com/c/pay/test";
+  }
+  async createPortal() {
+    return "https://billing.stripe.com/p/session/test";
+  }
+  async retrieveSubscription(id: string) {
+    const sub = this.subscriptions.get(id);
+    if (!sub) throw new Error(`no subscription ${id}`);
+    return sub;
+  }
+  verifyWebhook(raw: string, signature: string) {
+    return stripeForSigning.webhooks.constructEventAsync(raw, signature, WEBHOOK_SECRET);
+  }
+}
+
+export function signedWebhook(event: Record<string, unknown>) {
+  const payload = JSON.stringify(event);
+  const header = stripeForSigning.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+  return { payload, header };
+}
+
+export function makeApp(
+  opts: { config?: ConfigDoc; upstream?: FakeUpstream; mailer?: FakeMailer; billing?: FakeBilling | null } = {},
+) {
   const upstream = opts.upstream ?? new FakeUpstream();
+  const mailer = opts.mailer ?? new FakeMailer();
+  const billing = opts.billing === undefined ? new FakeBilling() : opts.billing;
   const app = createApp({
     sql: db(),
     apple: appleVerifier(CLIENT_ID, jwks),
@@ -99,13 +164,21 @@ export function makeApp(opts: { config?: ConfigDoc; upstream?: FakeUpstream } = 
     upstream,
     plans: new ConfigPlanProvider(db()),
     projectHashSalt: "test-salt-test-salt",
+    emailCodes: new EmailCodes(db(), "test-code-secret"),
+    mailer,
+    billing,
+    publicBaseUrl: "https://api.keel.test",
   });
-  return { app, upstream };
+  return { app, upstream, mailer, billing };
 }
 
 export type TestApp = ReturnType<typeof makeApp>["app"];
 
-export async function signIn(app: TestApp, sub = `apple-${randomUUID()}`, deviceId = randomUUID()) {
+/**
+ * Signs in with Apple. Accounts start on Free; tests that use the AI get the
+ * hand-assigned "beta" plan unless they ask for another.
+ */
+export async function signIn(app: TestApp, sub = `apple-${randomUUID()}`, deviceId = randomUUID(), plan: string | null = "beta") {
   const res = await app.request("/v1/auth/apple", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -113,6 +186,7 @@ export async function signIn(app: TestApp, sub = `apple-${randomUUID()}`, device
   });
   if (res.status !== 200) throw new Error(`sign in failed: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as { accessToken: string; refreshToken: string; account: { id: string } };
+  if (plan) await db()`update accounts set plan = ${plan} where id = ${body.account.id}`;
   return { ...body, deviceId, sub };
 }
 

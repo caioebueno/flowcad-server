@@ -49,6 +49,9 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
 
   const { accountId } = c.get("auth");
   const plan = await deps.plans.planFor(accountId, config.doc);
+  // AI needs Pro or a trial. Checked before the allowance so Free accounts
+  // see the upgrade sheet, not the allowance sheet.
+  if (plan.tier !== "pro") throw new ApiError(403, "plan_required", "The agent is part of Keel Pro");
   const usedMicros = await monthUsedMicros(deps.sql, accountId);
   if (usedMicros >= plan.monthlyAllowanceMicros) {
     throw new ApiError(402, "allowance_exhausted", "This month's AI allowance is used up");

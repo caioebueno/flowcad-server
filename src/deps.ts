@@ -5,6 +5,9 @@ import type { AccessTokens } from "./auth/tokens.js";
 import type { ConfigSource } from "./config/store.js";
 import type { Upstream } from "./proxy/upstream.js";
 import type { PlanProvider } from "./billing/plans.js";
+import type { EmailCodes } from "./auth/emailCodes.js";
+import type { Mailer } from "./auth/mailer.js";
+import type { BillingGateway } from "./billing/stripe.js";
 
 /** Everything the routes need, injected so tests can swap Apple, Anthropic and billing. */
 export interface Deps {
@@ -15,6 +18,12 @@ export interface Deps {
   config: ConfigSource;
   upstream: Upstream;
   plans: PlanProvider;
+  emailCodes: EmailCodes;
+  mailer: Mailer;
+  /** null when Stripe isn't configured: billing routes answer 503. */
+  billing: BillingGateway | null;
+  /** Public https origin of this service, for Stripe's return pages. */
+  publicBaseUrl: string;
   projectHashSalt: string;
 }
 

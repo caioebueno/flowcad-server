@@ -44,10 +44,13 @@ export const DEFAULT_CONFIG: ConfigDoc = {
     "claude-sonnet-5-5": { input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2 },
     "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01 },
   },
-  // Allowances are an open question in the spec; these are placeholders.
+  // Allowances are placeholders until Pro's price is set. "beta" and
+  // "internal" are hand-assigned and never changed by Stripe.
   plans: {
-    beta: { name: "Private beta", monthlyAllowanceMicros: 50_000_000 },
-    internal: { name: "Internal", monthlyAllowanceMicros: 1_000_000_000 },
+    free: { name: "Free", tier: "free", monthlyAllowanceMicros: 0 },
+    pro: { name: "Keel Pro", tier: "pro", monthlyAllowanceMicros: 10_000_000 },
+    beta: { name: "Private beta", tier: "pro", monthlyAllowanceMicros: 50_000_000 },
+    internal: { name: "Internal", tier: "pro", monthlyAllowanceMicros: 1_000_000_000 },
   },
   toolAllowlist: {},
   limits: {
@@ -61,6 +64,7 @@ export const DEFAULT_CONFIG: ConfigDoc = {
     concurrentRuns: 3,
     signInsPerHourPerIp: 10,
   },
+  billing: { trialDays: 14 },
   minAppVersion: "0.0.0",
   features: {},
   enforceToolAllowlist: false,
