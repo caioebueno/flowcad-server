@@ -242,3 +242,51 @@ describe("Stripe price lookups", () => {
     expect(await res.json()).toMatchObject({ billingAvailable: false });
   });
 });
+
+describe("a saved Stripe customer that Stripe no longer has", () => {
+  const missing = async () => {
+    const Stripe = (await import("stripe")).default;
+    return Stripe.errors.StripeError.generate({
+      type: "invalid_request_error",
+      code: "resource_missing",
+      param: "customer",
+      message: "No such customer: 'cus_old'",
+    } as never);
+  };
+
+  it("is replaced with a new customer and checkout goes ahead", async () => {
+    const billing = new FakeBilling();
+    const err = await missing();
+    const seen: string[] = [];
+    const real = billing.createCheckout.bind(billing);
+    billing.createCheckout = async (input) => {
+      seen.push(input.customerId);
+      if (input.customerId === "cus_old") throw err;
+      return real(input);
+    };
+    const { app } = makeApp({ billing });
+    const s = await signIn(app, undefined, undefined, null);
+    await db()`update accounts set stripe_customer_id = 'cus_old' where id = ${s.account.id}`;
+    const res = await app.request("/v1/billing/checkout", { method: "POST", headers: authed(s.accessToken), body: JSON.stringify({ interval: "month" }) });
+    expect(res.status).toBe(200);
+    expect(seen[0]).toBe("cus_old");
+    expect(seen[1]).not.toBe("cus_old");
+    const [row] = await db()`select stripe_customer_id from accounts where id = ${s.account.id}`;
+    expect(row!.stripe_customer_id).toBe(seen[1]);
+  });
+
+  it("is cleared by the portal, which answers 404", async () => {
+    const billing = new FakeBilling();
+    const err = await missing();
+    billing.createPortal = async () => {
+      throw err;
+    };
+    const { app } = makeApp({ billing });
+    const s = await signIn(app, undefined, undefined, null);
+    await db()`update accounts set stripe_customer_id = 'cus_old2' where id = ${s.account.id}`;
+    const res = await app.request("/v1/billing/portal", { method: "POST", headers: authed(s.accessToken) });
+    expect(res.status).toBe(404);
+    const [row] = await db()`select stripe_customer_id from accounts where id = ${s.account.id}`;
+    expect(row!.stripe_customer_id).toBeNull();
+  });
+});

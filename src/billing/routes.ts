@@ -9,7 +9,7 @@ import { log } from "../logger.js";
 import { canBuyPack, entitlementFor, HAND_ASSIGNED_PLANS, LIVE_STATUSES } from "./entitlement.js";
 import { creditBalance, creditPeriod, creditsSummary, grantPack, revokePack } from "./credits.js";
 import type { ConfigDoc } from "../config/schema.js";
-import type { BillingGateway } from "./stripe.js";
+import { isMissingCustomer, type BillingGateway } from "./stripe.js";
 
 const unavailable = () => new ApiError(503, "billing_unavailable", "Billing isn't set up on this server");
 
@@ -191,16 +191,40 @@ export function billingPublicRoutes(deps: Deps) {
 export function billingRoutes(deps: Deps) {
   const app = new Hono<AppEnv>();
 
-  /** The account's Stripe customer, created on first use with the account id in its metadata. */
-  const customerFor = async (accountId: string) => {
+  /**
+   * The account's Stripe customer, created on first use with the account id in its metadata.
+   * With `stale`, the saved id is one Stripe no longer knows, so a new customer replaces it.
+   */
+  const customerFor = async (accountId: string, stale: string | null = null) => {
     const [account] = await deps.sql<{ email: string | null; email_relay: string | null; stripe_customer_id: string | null }[]>`
       select email, email_relay, stripe_customer_id from accounts where id = ${accountId}`;
-    if (account!.stripe_customer_id) return account!.stripe_customer_id;
-    const created = await deps.billing!.createCustomer({ accountId, email: account!.email ?? account!.email_relay });
+    const saved = account!.stripe_customer_id;
+    if (saved && saved !== stale) return saved;
+    const created = await deps.billing!.createCustomer({
+      accountId,
+      email: account!.email ?? account!.email_relay,
+      replacing: stale,
+    });
+    // Only overwrite the id we found to be stale (or none), so a concurrent request's new id wins once.
     const [set] = await deps.sql<{ stripe_customer_id: string }[]>`
-      update accounts set stripe_customer_id = coalesce(stripe_customer_id, ${created}) where id = ${accountId}
+      update accounts set stripe_customer_id = case
+          when stripe_customer_id is null or stripe_customer_id = ${stale ?? ""} then ${created}
+          else stripe_customer_id end
+      where id = ${accountId}
       returning stripe_customer_id`;
     return set!.stripe_customer_id;
+  };
+
+  /** Runs a Stripe call with the account's customer, replacing the saved customer once if Stripe has lost it. */
+  const withCustomer = async <T>(accountId: string, fn: (customerId: string) => Promise<T>): Promise<T> => {
+    const customerId = await customerFor(accountId);
+    try {
+      return await fn(customerId);
+    } catch (err) {
+      if (!isMissingCustomer(err)) throw err;
+      log.warn("stripe_customer_replaced", { account: accountId, stale: customerId });
+      return fn(await customerFor(accountId, customerId));
+    }
   };
 
   app.get("/plans", async (c) => {
@@ -261,16 +285,18 @@ export function billingRoutes(deps: Deps) {
       throw new ApiError(409, "already_subscribed", "This account already has Pro. Manage it from the billing portal.");
     }
 
-    const customerId = await customerFor(accountId);
-    const url = await deps.billing.createCheckout({
-      customerId,
-      priceId,
-      trialDays: entitlement.trialEligible && doc.billing.trialDays > 0 ? doc.billing.trialDays : null,
-      accountId,
-      context: body.context ?? null,
-      successUrl: `${deps.publicBaseUrl}/v1/billing/return/success`,
-      cancelUrl: `${deps.publicBaseUrl}/v1/billing/return/cancel`,
-    });
+    const billing = deps.billing;
+    const url = await withCustomer(accountId, (customerId) =>
+      billing.createCheckout({
+        customerId,
+        priceId,
+        trialDays: entitlement.trialEligible && doc.billing.trialDays > 0 ? doc.billing.trialDays : null,
+        accountId,
+        context: body.context ?? null,
+        successUrl: `${deps.publicBaseUrl}/v1/billing/return/success`,
+        cancelUrl: `${deps.publicBaseUrl}/v1/billing/return/cancel`,
+      }),
+    );
     return c.json({ url });
   });
 
@@ -287,14 +313,17 @@ export function billingRoutes(deps: Deps) {
     }
     const priceId = deps.billing?.packPriceId();
     if (!deps.billing || !priceId) throw unavailable();
-    const url = await deps.billing.createPackCheckout({
-      customerId: await customerFor(accountId),
-      priceId,
-      accountId,
-      context: body.context ?? null,
-      successUrl: `${deps.publicBaseUrl}/v1/billing/return/pack-success`,
-      cancelUrl: `${deps.publicBaseUrl}/v1/billing/return/cancel`,
-    });
+    const billing = deps.billing;
+    const url = await withCustomer(accountId, (customerId) =>
+      billing.createPackCheckout({
+        customerId,
+        priceId,
+        accountId,
+        context: body.context ?? null,
+        successUrl: `${deps.publicBaseUrl}/v1/billing/return/pack-success`,
+        cancelUrl: `${deps.publicBaseUrl}/v1/billing/return/cancel`,
+      }),
+    );
     return c.json({ url });
   });
 
@@ -324,10 +353,20 @@ export function billingRoutes(deps: Deps) {
     const [account] = await deps.sql<{ stripe_customer_id: string | null }[]>`
       select stripe_customer_id from accounts where id = ${accountId}`;
     if (!account?.stripe_customer_id) throw new ApiError(404, "not_found", "No billing account yet");
-    const url = await deps.billing.createPortal({
-      customerId: account.stripe_customer_id,
-      returnUrl: `${deps.publicBaseUrl}/v1/billing/return/portal`,
-    });
+    let url: string;
+    try {
+      url = await deps.billing.createPortal({
+        customerId: account.stripe_customer_id,
+        returnUrl: `${deps.publicBaseUrl}/v1/billing/return/portal`,
+      });
+    } catch (err) {
+      if (!isMissingCustomer(err)) throw err;
+      // Nothing to manage under a customer Stripe has lost; the next checkout creates a new one.
+      log.warn("stripe_customer_cleared", { account: accountId, stale: account.stripe_customer_id });
+      await deps.sql`update accounts set stripe_customer_id = null
+        where id = ${accountId} and stripe_customer_id = ${account.stripe_customer_id}`;
+      throw new ApiError(404, "not_found", "No billing account yet");
+    }
     return c.json({ url });
   });
 

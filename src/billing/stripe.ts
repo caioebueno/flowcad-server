@@ -42,7 +42,8 @@ export interface BillingGateway {
   createPackCheckout(input: PackCheckoutInput): Promise<string>;
   /** Ends a trial now so billing starts ("Start Pro now"), and returns the updated subscription. */
   endTrial(subscriptionId: string): Promise<Stripe.Subscription>;
-  createCustomer(input: { accountId: string; email: string | null }): Promise<string>;
+  /** `replacing` is a saved customer id Stripe no longer knows (deleted, or from the other mode). */
+  createCustomer(input: { accountId: string; email: string | null; replacing?: string | null }): Promise<string>;
   createCheckout(input: CheckoutInput): Promise<string>;
   createPortal(input: { customerId: string; returnUrl: string }): Promise<string>;
   retrieveSubscription(id: string): Promise<Stripe.Subscription>;
@@ -120,10 +121,11 @@ export class StripeGateway implements BillingGateway {
     return this.stripe.subscriptions.update(subscriptionId, { trial_end: "now" });
   }
 
-  async createCustomer({ accountId, email }: { accountId: string; email: string | null }) {
+  async createCustomer({ accountId, email, replacing }: { accountId: string; email: string | null; replacing?: string | null }) {
     const customer = await this.stripe.customers.create(
       { email: email ?? undefined, metadata: { account_id: accountId } },
-      { idempotencyKey: `customer-${accountId}` },
+      // A replacement needs its own key, or Stripe would hand back the customer being replaced.
+      { idempotencyKey: replacing ? `customer-${accountId}-replaces-${replacing}` : `customer-${accountId}` },
     );
     return customer.id;
   }
@@ -168,4 +170,10 @@ export class StripeGateway implements BillingGateway {
   verifyWebhook(rawBody: string, signature: string) {
     return this.stripe.webhooks.constructEventAsync(rawBody, signature, this.cfg.webhookSecret);
   }
+}
+
+/** True when Stripe says the customer we sent doesn't exist (deleted, or saved under the other mode's key). */
+export function isMissingCustomer(err: unknown): boolean {
+  const e = err as { code?: string; param?: string; message?: string };
+  return e?.code === "resource_missing" && (e.param === "customer" || /no such customer/i.test(e.message ?? ""));
 }
