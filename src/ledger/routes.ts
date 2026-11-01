@@ -2,9 +2,10 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv, Deps } from "../deps.js";
 import { ApiError } from "../errors.js";
-import { monthOf, monthUsedMicros, projectHash } from "./ledger.js";
+import { monthOf, projectHash } from "./ledger.js";
 import { revokeDevice } from "../auth/tokens.js";
-import { entitlementFor } from "../billing/entitlement.js";
+import { canBuyPack, entitlementFor } from "../billing/entitlement.js";
+import { creditBalance, creditPeriod, creditsSummary, isExhausted, isLow, microsPerCredit } from "../billing/credits.js";
 
 const percent = (used: number, limit: number) => (limit <= 0 ? 100 : Math.round((used / limit) * 1000) / 10);
 
@@ -15,7 +16,7 @@ const nextMonth = (month: string) => {
 
 /**
  * Account summary and usage. Money never leaves the server as dollars: the
- * app shows the allowance as a percent, so price changes stay invisible.
+ * app shows AI credits (AI spec > Spec 8), so price changes stay invisible.
  */
 export function accountRoutes(deps: Deps) {
   const app = new Hono<AppEnv>();
@@ -24,13 +25,14 @@ export function accountRoutes(deps: Deps) {
     const { accountId, deviceId } = c.get("auth");
     const { doc } = await deps.config.current();
     const plan = await deps.plans.planFor(accountId, doc);
-    const used = await monthUsedMicros(deps.sql, accountId);
-    const month = monthOf();
+    const period = await creditPeriod(deps.sql, accountId, plan, doc);
+    const balance = period ? await creditBalance(deps.sql, accountId, period) : null;
     const [account] = await deps.sql<
       { email: string | null; email_relay: string | null; apple_user_id: string | null; created_at: Date; status: string }[]
     >`select email, email_relay, apple_user_id, created_at, status from accounts where id = ${accountId}`;
     const entitlement = await entitlementFor(deps.sql, accountId, doc);
-    const usedPercent = percent(used, plan.monthlyAllowanceMicros);
+    const month = monthOf();
+    const usedPercent = period && balance ? percent(balance.monthlyUsedMicros, period.limitMicros) : 100;
     return c.json({
       id: accountId,
       email: account?.email ?? account?.email_relay ?? null,
@@ -39,12 +41,14 @@ export function accountRoutes(deps: Deps) {
       createdAt: account?.created_at.toISOString(),
       plan: { id: plan.id, name: plan.name, tier: plan.tier },
       entitlement,
+      credits: period && balance ? creditsSummary(doc, period, balance, canBuyPack(deps, entitlement)) : null,
+      // Older builds read the allowance as a percent of the monthly credits.
       allowance: {
-        periodStart: new Date(`${month}T00:00:00Z`).toISOString(),
-        periodEnd: nextMonth(month),
+        periodStart: period?.start.toISOString() ?? new Date(`${month}T00:00:00Z`).toISOString(),
+        periodEnd: period?.end.toISOString() ?? nextMonth(month),
         usedPercent: Math.min(100, usedPercent),
-        warning: usedPercent >= doc.limits.allowanceWarningRatio * 100,
-        exhausted: used >= plan.monthlyAllowanceMicros,
+        warning: period && balance ? isLow(doc, period, balance.monthlyUsedMicros) : false,
+        exhausted: period && balance ? isExhausted(period, balance) : true,
       },
       currentDeviceId: deviceId,
     });
@@ -93,11 +97,16 @@ export function accountRoutes(deps: Deps) {
     const { accountId } = c.get("auth");
     const { doc } = await deps.config.current();
     const plan = await deps.plans.planFor(accountId, doc);
+    const period = await creditPeriod(deps.sql, accountId, plan, doc);
+    const limitMicros = period?.limitMicros ?? 0;
+    const mpc = microsPerCredit(doc);
 
-    const from = q.from ?? monthOf();
+    const from = q.from ?? (period ? period.start.toISOString() : monthOf());
     const toExclusive = q.to
       ? new Date(Date.parse(`${q.to}T00:00:00Z`) + 86_400_000).toISOString()
-      : nextMonth(monthOf());
+      : period
+        ? period.end.toISOString()
+        : nextMonth(monthOf());
 
     const key =
       q.groupBy === "day"
@@ -139,7 +148,8 @@ export function accountRoutes(deps: Deps) {
         cacheWriteTokens: r.cache_write,
         cacheReadTokens: r.cache_read,
         outputTokens: r.output,
-        allowancePercent: percent(r.cost, plan.monthlyAllowanceMicros),
+        credits: r.cost <= 0 ? 0 : Math.ceil(r.cost / mpc - 1e-9),
+        allowancePercent: percent(r.cost, limitMicros),
       })),
     });
   });

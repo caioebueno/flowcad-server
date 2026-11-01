@@ -47,7 +47,8 @@ export const PlanSchema = z.strictObject({
   name: z.string(),
   /** "pro" plans can use the AI; "free" plans get 403 plan_required. */
   tier: z.enum(["free", "pro"]),
-  monthlyAllowanceMicros: z.number().int().nonnegative(),
+  /** AI credits each credit period (the Stripe billing period, or the calendar month for hand-assigned plans). */
+  monthlyCredits: z.number().int().nonnegative(),
 });
 
 export const ConfigDocSchema = z.strictObject({
@@ -72,9 +73,20 @@ export const ConfigDocSchema = z.strictObject({
     concurrentRuns: z.number().int().positive(),
     signInsPerHourPerIp: z.number().int().positive(),
   }),
+  credits: z.strictObject({
+    /** Credits per US dollar of model cost. 150 means one credit is 1/150 of a dollar. */
+    perDollar: z.number().positive(),
+  }),
   billing: z.strictObject({
     /** Free Pro trial length, given once per account through Stripe Checkout. */
     trialDays: z.number().int().min(0).max(90),
+    /** Credits for the whole trial, in place of the plan's monthly credits. */
+    trialCredits: z.number().int().nonnegative(),
+    /** One-time credit packs, bought through Stripe Checkout. */
+    pack: z.strictObject({
+      credits: z.number().int().positive(),
+      validMonths: z.number().int().positive(),
+    }),
   }),
   minAppVersion: z.string(),
   features: z.record(z.string(), z.boolean()),

@@ -55,7 +55,7 @@ describe("GET /billing/plans", () => {
     const { app } = makeApp();
     const s = await signIn(app, undefined, undefined, null);
     const body = (await (await app.request("/v1/billing/plans", { headers: authed(s.accessToken) })).json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ trialDays: 14, trialEligible: true, billingAvailable: true });
+    expect(body).toMatchObject({ trialDays: 15, trialCredits: 1000, trialEligible: true, billingAvailable: true });
     expect(JSON.stringify(body.plans)).toContain('"amount":2000');
   });
 });
@@ -72,7 +72,7 @@ describe("checkout", () => {
     expect(await res.json()).toEqual({ url: "https://checkout.stripe.com/c/pay/test" });
     expect(billing.checkouts[0]).toMatchObject({
       priceId: "price_year",
-      trialDays: 14,
+      trialDays: 15,
       accountId: s.account.id,
       context: "selection_hud",
       successUrl: "https://api.keel.test/v1/billing/return/success",

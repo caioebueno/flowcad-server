@@ -21,6 +21,8 @@ const EnvSchema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   STRIPE_PRICE_MONTH: z.string().optional(),
   STRIPE_PRICE_YEAR: z.string().optional(),
+  /** One-time price of a 1,000-credit pack ($10). Packs answer 503 until it is set. */
+  STRIPE_PRICE_PACK: z.string().optional(),
   STRIPE_AUTOMATIC_TAX: z.enum(["true", "false"]).default("false"),
   /** App Attest is phase 2. "off" accepts requests without an assertion. */
   APP_ATTEST_MODE: z.enum(["off", "enforce"]).default("off"),

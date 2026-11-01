@@ -44,13 +44,14 @@ export const DEFAULT_CONFIG: ConfigDoc = {
     "claude-sonnet-5-5": { input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2 },
     "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01 },
   },
-  // Allowances are placeholders until Pro's price is set. "beta" and
-  // "internal" are hand-assigned and never changed by Stripe.
+  // AI spec > Spec 8 (Nov 1): Pro is $39 a month or $390 a year (prices live in
+  // Stripe) with 2,000 credits. "beta" and "internal" are hand-assigned and
+  // never changed by Stripe.
   plans: {
-    free: { name: "Free", tier: "free", monthlyAllowanceMicros: 0 },
-    pro: { name: "Keel Pro", tier: "pro", monthlyAllowanceMicros: 10_000_000 },
-    beta: { name: "Private beta", tier: "pro", monthlyAllowanceMicros: 50_000_000 },
-    internal: { name: "Internal", tier: "pro", monthlyAllowanceMicros: 1_000_000_000 },
+    free: { name: "Free", tier: "free", monthlyCredits: 0 },
+    pro: { name: "Keel Pro", tier: "pro", monthlyCredits: 2_000 },
+    beta: { name: "Private beta", tier: "pro", monthlyCredits: 2_000 },
+    internal: { name: "Internal", tier: "pro", monthlyCredits: 150_000 },
   },
   toolAllowlist: {},
   limits: {
@@ -64,7 +65,10 @@ export const DEFAULT_CONFIG: ConfigDoc = {
     concurrentRuns: 3,
     signInsPerHourPerIp: 10,
   },
-  billing: { trialDays: 14 },
+  // One credit is 1/150 of a dollar of model cost.
+  credits: { perDollar: 150 },
+  // 15-day trial with 1,000 credits (Pro prorated); packs of 1,000 for $10 that last 12 months.
+  billing: { trialDays: 15, trialCredits: 1_000, pack: { credits: 1_000, validMonths: 12 } },
   minAppVersion: "0.0.0",
   features: {},
   enforceToolAllowlist: false,

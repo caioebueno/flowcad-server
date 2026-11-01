@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { authed, makeApp, readSse, signIn, textReply, turnBody } from "./helpers.js";
 
 describe("GET /usage and /account", () => {
-  it("groups use by task type and project, as percent of the allowance", async () => {
+  it("groups use by task type and project, in credits", async () => {
     const { app, upstream } = makeApp();
-    upstream.events = textReply("x", { input: 0, output: 25_000 }); // $0.50 = 1% of $50
+    upstream.events = textReply("x", { input: 0, output: 25_000 }); // $0.50 = 75 credits
     const s = await signIn(app);
     const t = (o: Record<string, unknown>) =>
       app.request("/v1/agent/turn", { method: "POST", headers: authed(s.accessToken), body: JSON.stringify(turnBody(o)) }).then(readSse);
@@ -13,11 +13,11 @@ describe("GET /usage and /account", () => {
     await t({ taskType: "ask", projectId: "A" });
 
     const byTask = (await (await app.request("/v1/usage?groupBy=task_type", { headers: authed(s.accessToken) })).json()) as {
-      rows: { key: string; turns: number; allowancePercent: number }[];
+      rows: { key: string; turns: number; credits: number }[];
     };
     expect(byTask.rows).toEqual([
-      expect.objectContaining({ key: "ask", turns: 1, allowancePercent: 1 }),
-      expect.objectContaining({ key: "change", turns: 2, allowancePercent: 2 }),
+      expect.objectContaining({ key: "ask", turns: 1, credits: 75 }),
+      expect.objectContaining({ key: "change", turns: 2, credits: 150 }),
     ]);
     expect(JSON.stringify(byTask)).not.toContain("cost");
 
@@ -31,10 +31,22 @@ describe("GET /usage and /account", () => {
 
     const account = (await (await app.request("/v1/account", { headers: authed(s.accessToken) })).json()) as {
       plan: { id: string };
+      credits: Record<string, unknown>;
       allowance: { usedPercent: number; warning: boolean };
     };
     expect(account.plan.id).toBe("beta");
-    expect(account.allowance).toMatchObject({ usedPercent: 3, warning: false });
+    expect(account.credits).toMatchObject({
+      monthlyUsed: 225,
+      monthlyLimit: 2000,
+      extra: 0,
+      extraExpiresAt: null,
+      isTrial: false,
+      low: false,
+      exhausted: false,
+      left: 1775,
+      canBuyPack: true,
+    });
+    expect(account.allowance).toMatchObject({ usedPercent: 11.3, warning: false });
   });
 
   it("keeps accounts apart", async () => {

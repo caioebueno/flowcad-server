@@ -7,7 +7,9 @@ import { requireAttestation } from "../auth/middleware.js";
 import { checkAgainstProfile, rejectServerTools, TurnBody } from "./request.js";
 import { buildParams, mapUpstreamError, type StreamEvent } from "./upstream.js";
 import { priceUsage, StreamUsage } from "./usage.js";
-import { monthUsedMicros, projectHash, recordUsage, runTotals } from "../ledger/ledger.js";
+import { projectHash, recordUsage, runTotals } from "../ledger/ledger.js";
+import { creditBalance, creditPeriod, creditsLeft, isExhausted, isLow, microsPerCredit, type CreditPeriod } from "../billing/credits.js";
+import { packsAvailable } from "../billing/entitlement.js";
 import { log } from "../logger.js";
 import type { LoadedConfig } from "../config/store.js";
 import type { Plan } from "../billing/plans.js";
@@ -17,15 +19,20 @@ const HARD_BODY_LIMIT = 8 * 1024 * 1024;
 
 const percent = (used: number, limit: number) => (limit <= 0 ? 100 : Math.min(100, Math.round((used / limit) * 1000) / 10));
 
+/** Whole credits for a cost, rounded up: any use costs at least one credit. */
+const creditsCharged = (costMicros: number, mpc: number) => (costMicros <= 0 ? 0 : Math.ceil(costMicros / mpc - 1e-9));
+
 interface Prepared {
   body: TurnBody;
   config: LoadedConfig;
   plan: Plan;
+  period: CreditPeriod;
   usedMicros: number;
+  extraMicros: number;
   profile: ReturnType<typeof checkAgainstProfile>;
 }
 
-/** Steps 1 to 3 of the proxy: size, shape, profile, allowance. */
+/** Steps 1 to 3 of the proxy: size, shape, profile, plan and credits. */
 async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
   const config = await deps.config.current();
   const text = await c.req.text();
@@ -52,11 +59,16 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
   // AI needs Pro or a trial. Checked before the allowance so Free accounts
   // see the upgrade sheet, not the allowance sheet.
   if (plan.tier !== "pro") throw new ApiError(403, "plan_required", "The agent is part of Keel Pro");
-  const usedMicros = await monthUsedMicros(deps.sql, accountId);
-  if (usedMicros >= plan.monthlyAllowanceMicros) {
-    throw new ApiError(402, "allowance_exhausted", "This month's AI allowance is used up");
+  const period = (await creditPeriod(deps.sql, accountId, plan, config.doc))!;
+  const balance = await creditBalance(deps.sql, accountId, period);
+  if (isExhausted(period, balance)) {
+    throw new ApiError(402, "credits_exhausted", "You're out of AI credits", {
+      isTrial: period.isTrial,
+      resetsAt: period.end.toISOString(),
+      canBuyPack: !period.isTrial && packsAvailable(deps),
+    });
   }
-  return { body, config, plan, usedMicros, profile };
+  return { body, config, plan, period, usedMicros: balance.monthlyUsedMicros, extraMicros: balance.extraMicros, profile };
 }
 
 export function proxyRoutes(deps: Deps) {
@@ -70,7 +82,7 @@ export function proxyRoutes(deps: Deps) {
 
   app.post("/turn", limit, requireAttestation(deps), async (c) => {
     const started = Date.now();
-    const { body, config, plan, usedMicros, profile } = await prepare(c, deps);
+    const { body, config, period, usedMicros, extraMicros, profile } = await prepare(c, deps);
     const { accountId, deviceId } = c.get("auth");
     const limits = config.doc.limits;
 
@@ -128,7 +140,7 @@ export function proxyRoutes(deps: Deps) {
       // Whatever happened, Anthropic billed what it produced, so it is recorded.
       const priced = priceUsage(config.doc, profile.model, usage.raw);
       const latencyMs = Date.now() - started;
-      const { usedMicros: newUsed } = await recordUsage(
+      const after = await recordUsage(
         deps.sql,
         {
           accountId,
@@ -150,11 +162,11 @@ export function proxyRoutes(deps: Deps) {
           latencyMs,
           configVersion: config.version,
         },
-        plan.monthlyAllowanceMicros,
+        period,
       ).catch((err) => {
         // Losing a ledger row is bad but must not hide the reply already sent.
         log.error("ledger_write_failed", { account: accountId, run: body.runId, err: (err as Error).message });
-        return { usedMicros: usedMicros + priced.costMicros };
+        return { monthlyUsedMicros: usedMicros + priced.costMicros, extraMicros };
       });
       log.info("turn", {
         account: accountId,
@@ -169,7 +181,9 @@ export function proxyRoutes(deps: Deps) {
       });
 
       if (s.aborted) return;
-      const allowanceUsedPercent = percent(newUsed, plan.monthlyAllowanceMicros);
+      const allowanceUsedPercent = percent(after.monthlyUsedMicros, period.limitMicros);
+      const left = creditsLeft(config.doc, period, after);
+      const resetsAt = period.end.toISOString();
       await s.writeSSE({
         event: "keel.usage",
         data: JSON.stringify({
@@ -180,16 +194,20 @@ export function proxyRoutes(deps: Deps) {
           outputTokens: priced.outputTokens,
           costMicros: priced.costMicros,
           servedModel: priced.servedModel,
+          creditsCharged: creditsCharged(priced.costMicros, microsPerCredit(config.doc)),
+          creditsLeft: left,
+          resetsAt,
+          // Older builds read these percents of the monthly credits.
           allowanceUsedPercent,
           allowanceLeftPercent: Math.max(0, Math.round((100 - allowanceUsedPercent) * 10) / 10),
           runTurnsLeft: Math.max(0, limits.maxTurnsPerRun - run.turns - 1),
           runBudgetUsedPercent: percent(run.costMicros + priced.costMicros, limits.maxCostPerRunMicros),
         }),
       });
-      if (!failed && newUsed >= plan.monthlyAllowanceMicros * limits.allowanceWarningRatio) {
+      if (!failed && isLow(config.doc, period, after.monthlyUsedMicros)) {
         await s.writeSSE({
           event: "keel.warning",
-          data: JSON.stringify({ type: "keel.warning", code: "allowance_low", allowanceUsedPercent }),
+          data: JSON.stringify({ type: "keel.warning", code: "credits_low", creditsLeft: left, resetsAt, allowanceUsedPercent }),
         });
       }
     });
@@ -197,12 +215,12 @@ export function proxyRoutes(deps: Deps) {
 
   app.post("/keepwarm", limit, requireAttestation(deps), async (c) => {
     const started = Date.now();
-    const { body, config, plan, profile } = await prepare(c, deps);
+    const { body, config, period, profile } = await prepare(c, deps);
     const { accountId, deviceId } = c.get("auth");
     const params = buildParams(profile, body.request, { effort: body.effort, maxOutputTokens: body.maxOutputTokens });
     const usage = await deps.upstream.prewarm(params);
     const priced = priceUsage(config.doc, profile.model, usage as never);
-    const { usedMicros } = await recordUsage(
+    const after = await recordUsage(
       deps.sql,
       {
         accountId,
@@ -224,7 +242,7 @@ export function proxyRoutes(deps: Deps) {
         latencyMs: Date.now() - started,
         configVersion: config.version,
       },
-      plan.monthlyAllowanceMicros,
+      period,
     );
     return c.json({
       inputTokens: priced.inputTokens,
@@ -232,7 +250,9 @@ export function proxyRoutes(deps: Deps) {
       cacheReadTokens: priced.cacheReadTokens,
       outputTokens: priced.outputTokens,
       costMicros: priced.costMicros,
-      allowanceUsedPercent: percent(usedMicros, plan.monthlyAllowanceMicros),
+      creditsCharged: creditsCharged(priced.costMicros, microsPerCredit(config.doc)),
+      creditsLeft: creditsLeft(config.doc, period, after),
+      allowanceUsedPercent: percent(after.monthlyUsedMicros, period.limitMicros),
     });
   });
 

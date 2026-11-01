@@ -5,7 +5,7 @@ export interface Plan {
   id: string;
   name: string;
   tier: "free" | "pro";
-  monthlyAllowanceMicros: number;
+  monthlyCredits: number;
 }
 
 /**
@@ -24,7 +24,7 @@ export class ConfigPlanProvider implements PlanProvider {
     const [row] = await this.sql<{ plan: string }[]>`select plan from accounts where id = ${accountId}`;
     const id = row?.plan ?? "free";
     const plan = config.plans[id];
-    if (!plan) return { id, name: id, tier: "free", monthlyAllowanceMicros: 0 };
+    if (!plan) return { id, name: id, tier: "free", monthlyCredits: 0 };
     return { id, ...plan };
   }
 }
