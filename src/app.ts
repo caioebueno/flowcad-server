@@ -10,6 +10,7 @@ import { proxyRoutes } from "./proxy/routes.js";
 import { accountRoutes } from "./ledger/routes.js";
 import { log } from "./logger.js";
 import { appliedMigrations } from "./db/index.js";
+import Stripe from "stripe";
 
 /** Bump when adding a file to migrations/. The health check fails until all are applied. */
 export const EXPECTED_MIGRATIONS = 3;
@@ -37,7 +38,26 @@ export function createApp(deps: Deps) {
       if (err.status === 429) c.header("Retry-After", String(err.details?.retryAfter ?? 30));
       return c.json(err.toJSON(), err.status);
     }
-    log.error("unhandled", { id: c.get("requestId"), path: c.req.routePath, err: err.name });
+    if (err instanceof Stripe.errors.StripeError) {
+      // Stripe's own message says what's wrong with the setup (a missing price, a key from the
+      // other mode, Stripe Tax not set up) and holds no card details, so it is safe to log.
+      log.error("stripe_error", {
+        id: c.get("requestId"),
+        path: c.req.routePath,
+        type: err.type,
+        code: err.code ?? null,
+        param: err.param ?? null,
+        message: err.message,
+        stripeRequest: err.requestId ?? null,
+      });
+      return c.json(
+        new ApiError(502, "billing_error", "Stripe couldn't complete this request", {
+          stripeCode: err.code ?? err.type,
+        }).toJSON(),
+        502,
+      );
+    }
+    log.error("unhandled", { id: c.get("requestId"), path: c.req.routePath, err: err.name, message: err.message });
     return c.json(new ApiError(500, "internal", "Something went wrong").toJSON(), 500);
   });
   app.notFound((c) => c.json(new ApiError(404, "not_found", "Not found").toJSON(), 404));

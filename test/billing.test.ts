@@ -208,3 +208,37 @@ describe("Stripe webhook", () => {
     expect(row).toBeUndefined();
   });
 });
+
+describe("Stripe errors", () => {
+  it("answer 502 billing_error with Stripe's code instead of a bare 500", async () => {
+    const Stripe = (await import("stripe")).default;
+    const billing = new FakeBilling();
+    billing.createCheckout = async () => {
+      throw Stripe.errors.StripeError.generate({
+        type: "invalid_request_error",
+        code: "resource_missing",
+        param: "line_items[0][price]",
+        message: "No such price: 'price_month'",
+      } as never);
+    };
+    const { app } = makeApp({ billing });
+    const s = await signIn(app, undefined, undefined, null);
+    const res = await app.request("/v1/billing/checkout", { method: "POST", headers: authed(s.accessToken), body: JSON.stringify({ interval: "month" }) });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ error: { code: "billing_error", details: { stripeCode: "resource_missing" } } });
+  });
+});
+
+describe("Stripe price lookups", () => {
+  it("leave /billing/plans working with billing unavailable when Stripe refuses", async () => {
+    const billing = new FakeBilling();
+    billing.prices = async () => {
+      throw new Error("No such price: 'prod_123'");
+    };
+    const { app } = makeApp({ billing });
+    const s = await signIn(app, undefined, undefined, null);
+    const res = await app.request("/v1/billing/plans", { headers: authed(s.accessToken) });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ billingAvailable: false });
+  });
+});

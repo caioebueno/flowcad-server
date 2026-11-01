@@ -12,6 +12,7 @@ export type ErrorCode =
   | "plan_required"
   | "already_subscribed"
   | "billing_unavailable"
+  | "billing_error"
   | "allowance_exhausted"
   | "credits_exhausted"
   | "packs_unavailable_during_trial"
