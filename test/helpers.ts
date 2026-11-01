@@ -13,7 +13,7 @@ import { ConfigPlanProvider } from "../src/billing/plans.js";
 import type { StreamEvent, Upstream, UpstreamParams } from "../src/proxy/upstream.js";
 import { EmailCodes } from "../src/auth/emailCodes.js";
 import type { Mailer } from "../src/auth/mailer.js";
-import type { BillingGateway, CheckoutInput } from "../src/billing/stripe.js";
+import type { BillingGateway, CheckoutInput, PackCheckoutInput } from "../src/billing/stripe.js";
 import Stripe from "stripe";
 
 export const CLIENT_ID = "app.keel.mac";
@@ -112,7 +112,31 @@ const stripeForSigning = new Stripe("sk_test_dummy");
 export class FakeBilling implements BillingGateway {
   customers: { accountId: string; email: string | null }[] = [];
   checkouts: CheckoutInput[] = [];
+  packCheckouts: PackCheckoutInput[] = [];
+  endedTrials: string[] = [];
   subscriptions = new Map<string, Stripe.Subscription>();
+  /** null turns packs off, as when STRIPE_PRICE_PACK isn't set. */
+  packPriceIdValue: string | null = "price_pack";
+  packPriceId() {
+    return this.packPriceIdValue;
+  }
+  async packPrice() {
+    return this.packPriceIdValue ? { unitAmount: 1000, currency: "usd" } : null;
+  }
+  async createPackCheckout(input: PackCheckoutInput) {
+    this.packCheckouts.push(input);
+    return "https://checkout.stripe.com/c/pay/pack";
+  }
+  /** Replaces the subscription with what Stripe returns after trial_end: "now"; tests set `afterTrial`. */
+  afterTrial: ((sub: Stripe.Subscription) => Stripe.Subscription) | null = null;
+  async endTrial(id: string) {
+    this.endedTrials.push(id);
+    const sub = this.subscriptions.get(id);
+    if (!sub) throw new Error(`no subscription ${id}`);
+    const next = this.afterTrial ? this.afterTrial(sub) : ({ ...sub, status: "active", trial_end: null } as Stripe.Subscription);
+    this.subscriptions.set(id, next);
+    return next;
+  }
   priceFor(interval: "month" | "year") {
     return interval === "month" ? "price_month" : "price_year";
   }

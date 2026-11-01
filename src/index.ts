@@ -32,6 +32,7 @@ const billing =
         secretKey: env.STRIPE_SECRET_KEY,
         webhookSecret: env.STRIPE_WEBHOOK_SECRET,
         prices: { month: env.STRIPE_PRICE_MONTH, year: env.STRIPE_PRICE_YEAR },
+        packPrice: env.STRIPE_PRICE_PACK ?? null,
         automaticTax: env.STRIPE_AUTOMATIC_TAX === "true",
       })
     : null;

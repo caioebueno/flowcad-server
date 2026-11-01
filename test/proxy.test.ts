@@ -157,19 +157,20 @@ describe("POST /agent/turn", () => {
     expect(events[0]).toMatchObject({ event: "keel.error", data: { limit: "cost" } });
   });
 
-  it("warns at 80% of the allowance and returns 402 at 100%", async () => {
-    const config = { ...DEFAULT_CONFIG, plans: { ...DEFAULT_CONFIG.plans, beta: { name: "Tiny", tier: "pro" as const, monthlyAllowanceMicros: 100_000 } } };
+  it("warns with 20% of the credits left and returns 402 when they run out", async () => {
+    // 15 credits = 100,000 micro dollars.
+    const config = { ...DEFAULT_CONFIG, plans: { ...DEFAULT_CONFIG.plans, beta: { name: "Tiny", tier: "pro" as const, monthlyCredits: 15 } } };
     const { app, upstream } = makeApp({ config });
     upstream.events = textReply("x", { input: 0, output: 4_500 }); // 90,000 micros
     const s = await signIn(app);
     const events = await readSse(await turn(app, s.accessToken, turnBody()));
-    expect(events.at(-1)).toMatchObject({ event: "keel.warning", data: { code: "allowance_low" } });
-    expect(events.at(-2)!.data.allowanceUsedPercent).toBe(90);
+    expect(events.at(-1)).toMatchObject({ event: "keel.warning", data: { code: "credits_low", creditsLeft: 1 } });
+    expect(events.at(-2)!.data).toMatchObject({ creditsCharged: 14, creditsLeft: 1, allowanceUsedPercent: 90 });
 
     await readSse(await turn(app, s.accessToken, turnBody())); // goes past 100%, allowed to finish
     const res = await turn(app, s.accessToken, turnBody());
     expect(res.status).toBe(402);
-    expect(await errorCode(res)).toBe("allowance_exhausted");
+    expect(await errorCode(res)).toBe("credits_exhausted");
   });
 
   it("prices a fallback-served turn at each model's rate", async () => {

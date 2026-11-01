@@ -32,34 +32,61 @@ export function monthOf(at = new Date()): string {
   return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1)).toISOString().slice(0, 10);
 }
 
-/** Writes one ledger row and adds its cost to the month's allowance, atomically. */
-export async function recordUsage(sql: Sql, row: LedgerRow, limitMicros: number): Promise<{ usedMicros: number }> {
+/**
+ * Writes one ledger row and charges its cost, atomically: first to the credit
+ * period's monthly credits, then to pack credits (soonest expiry first). A turn
+ * that runs past everything is still charged to the period, so the overrun
+ * is counted and the next turn is refused.
+ */
+export async function recordUsage(
+  sql: Sql,
+  row: LedgerRow,
+  period: { start: Date; limitMicros: number },
+): Promise<{ monthlyUsedMicros: number; extraMicros: number }> {
   return sql.begin(async (tx) => {
+    // Upserting first locks the period's row, so concurrent turns charge in order.
+    const [a] = await tx<{ used_micros: number }[]>`
+      insert into allowances (account_id, period_start, month, limit_micros, used_micros)
+      values (${row.accountId}, ${period.start}, ${monthOf(period.start)}, ${period.limitMicros}, 0)
+      on conflict (account_id, period_start) do update set limit_micros = excluded.limit_micros
+      returning used_micros`;
+    const used = a!.used_micros;
+    const toMonthly = Math.min(row.costMicros, Math.max(0, period.limitMicros - used));
+    let rest = row.costMicros - toMonthly;
+    let fromExtra = 0;
+    if (rest > 0) {
+      const grants = await tx<{ id: string; remaining_micros: number }[]>`
+        select id, remaining_micros from credit_grants
+        where account_id = ${row.accountId} and remaining_micros > 0 and expires_at > now()
+        order by expires_at, created_at for update`;
+      for (const g of grants) {
+        if (rest <= 0) break;
+        const take = Math.min(rest, g.remaining_micros);
+        await tx`update credit_grants set remaining_micros = remaining_micros - ${take} where id = ${g.id}`;
+        rest -= take;
+        fromExtra += take;
+      }
+    }
+    const [updated] = await tx<{ used_micros: number }[]>`
+      update allowances set used_micros = used_micros + ${toMonthly + rest}
+      where account_id = ${row.accountId} and period_start = ${period.start}
+      returning used_micros`;
     await tx`
       insert into usage_ledger (
         account_id, device_id, project_hash, thread_id, run_id, turn_index, task_type, kind, model, served_model,
-        input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_micros, stop_reason, latency_ms, config_version
+        input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_micros, extra_micros, stop_reason,
+        latency_ms, config_version
       ) values (
         ${row.accountId}, ${row.deviceId}, ${row.projectHash}, ${row.threadId}, ${row.runId}, ${row.turnIndex},
         ${row.taskType}, ${row.kind}, ${row.model}, ${row.servedModel}, ${row.inputTokens}, ${row.cacheWriteTokens},
-        ${row.cacheReadTokens}, ${row.outputTokens}, ${row.costMicros}, ${row.stopReason}, ${row.latencyMs},
+        ${row.cacheReadTokens}, ${row.outputTokens}, ${row.costMicros}, ${fromExtra}, ${row.stopReason}, ${row.latencyMs},
         ${row.configVersion}
       )`;
-    const [a] = await tx<{ used_micros: number }[]>`
-      insert into allowances (account_id, month, limit_micros, used_micros)
-      values (${row.accountId}, ${monthOf()}, ${limitMicros}, ${row.costMicros})
-      on conflict (account_id, month) do update
-        set used_micros = allowances.used_micros + excluded.used_micros,
-            limit_micros = excluded.limit_micros
-      returning used_micros`;
-    return { usedMicros: a!.used_micros };
+    const [g] = await tx<{ remaining: number }[]>`
+      select coalesce(sum(remaining_micros), 0)::bigint as remaining from credit_grants
+      where account_id = ${row.accountId} and remaining_micros > 0 and expires_at > now()`;
+    return { monthlyUsedMicros: updated!.used_micros, extraMicros: g?.remaining ?? 0 };
   });
-}
-
-export async function monthUsedMicros(sql: Sql, accountId: string): Promise<number> {
-  const [row] = await sql<{ used_micros: number }[]>`
-    select used_micros from allowances where account_id = ${accountId} and month = ${monthOf()}`;
-  return row?.used_micros ?? 0;
 }
 
 export async function runTotals(sql: Sql, accountId: string, runId: string): Promise<{ turns: number; costMicros: number }> {

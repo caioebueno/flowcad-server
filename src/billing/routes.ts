@@ -6,7 +6,9 @@ import type { Sql } from "../db/index.js";
 import { ApiError } from "../errors.js";
 import { parseJson } from "../util/validate.js";
 import { log } from "../logger.js";
-import { entitlementFor, HAND_ASSIGNED_PLANS, LIVE_STATUSES } from "./entitlement.js";
+import { canBuyPack, entitlementFor, HAND_ASSIGNED_PLANS, LIVE_STATUSES } from "./entitlement.js";
+import { creditBalance, creditPeriod, creditsSummary, grantPack, revokePack } from "./credits.js";
+import type { ConfigDoc } from "../config/schema.js";
 import type { BillingGateway } from "./stripe.js";
 
 const unavailable = () => new ApiError(503, "billing_unavailable", "Billing isn't set up on this server");
@@ -28,18 +30,24 @@ export async function syncSubscription(sql: Sql, sub: Stripe.Subscription): Prom
     log.warn("stripe_subscription_unmatched", { subscription: sub.id });
     return null;
   }
-  const item = sub.items?.data?.[0] as (Stripe.SubscriptionItem & { current_period_end?: number }) | undefined;
+  const item = sub.items?.data?.[0] as
+    | (Stripe.SubscriptionItem & { current_period_start?: number; current_period_end?: number })
+    | undefined;
   // Newer API versions keep the period on the item; older ones on the subscription.
-  const periodEnd = item?.current_period_end ?? (sub as unknown as { current_period_end?: number }).current_period_end;
+  const legacy = sub as unknown as { current_period_start?: number; current_period_end?: number };
+  const periodStart = item?.current_period_start ?? legacy.current_period_start;
+  const periodEnd = item?.current_period_end ?? legacy.current_period_end;
+  const interval = item?.price?.recurring?.interval ?? null;
 
   await sql.begin(async (tx) => {
     await tx`
-      insert into subscriptions (stripe_subscription_id, account_id, stripe_price_id, status, current_period_end,
-                                 trial_end, cancel_at_period_end, updated_at)
-      values (${sub.id}, ${account.id}, ${item?.price?.id ?? null}, ${sub.status}, ${toDate(periodEnd)},
-              ${toDate(sub.trial_end)}, ${sub.cancel_at_period_end ?? false}, now())
+      insert into subscriptions (stripe_subscription_id, account_id, stripe_price_id, price_interval, status,
+                                 current_period_start, current_period_end, trial_end, cancel_at_period_end, updated_at)
+      values (${sub.id}, ${account.id}, ${item?.price?.id ?? null}, ${interval}, ${sub.status},
+              ${toDate(periodStart)}, ${toDate(periodEnd)}, ${toDate(sub.trial_end)}, ${sub.cancel_at_period_end ?? false}, now())
       on conflict (stripe_subscription_id) do update set
-        status = excluded.status, stripe_price_id = excluded.stripe_price_id,
+        status = excluded.status, stripe_price_id = excluded.stripe_price_id, price_interval = excluded.price_interval,
+        current_period_start = excluded.current_period_start,
         current_period_end = excluded.current_period_end, trial_end = excluded.trial_end,
         cancel_at_period_end = excluded.cancel_at_period_end, updated_at = now()`;
     await tx`update accounts set stripe_customer_id = coalesce(stripe_customer_id, ${customerId}) where id = ${account.id}`;
@@ -66,10 +74,26 @@ function subscriptionIdOf(obj: unknown): string | null {
   return typeof ref === "string" ? ref : ref.id;
 }
 
-async function handleEvent(sql: Sql, billing: BillingGateway, event: Stripe.Event) {
+const idOf = (ref: string | { id: string } | null | undefined) => (!ref ? null : typeof ref === "string" ? ref : ref.id);
+
+async function handleEvent(sql: Sql, billing: BillingGateway, config: ConfigDoc, event: Stripe.Event) {
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
+      if (session.mode === "payment") {
+        // A credit pack. Granted here and on payment_intent.succeeded, whichever comes first.
+        const accountId = session.metadata?.account_id;
+        const paymentIntentId = idOf(session.payment_intent);
+        if (session.metadata?.kind === "credit_pack" && accountId && paymentIntentId && session.payment_status === "paid") {
+          await grantPack(sql, config, {
+            accountId,
+            paymentIntentId,
+            amountCents: session.amount_total ?? null,
+            currency: session.currency ?? null,
+          });
+        }
+        return;
+      }
       const accountId = session.client_reference_id ?? session.metadata?.account_id;
       const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
       if (accountId && customerId) {
@@ -91,6 +115,23 @@ async function handleEvent(sql: Sql, billing: BillingGateway, event: Stripe.Even
     case "invoice.paid": {
       const subId = subscriptionIdOf(event.data.object);
       if (subId) await syncSubscription(sql, await billing.retrieveSubscription(subId));
+      return;
+    }
+    case "payment_intent.succeeded": {
+      const pi = event.data.object as Stripe.PaymentIntent;
+      const accountId = pi.metadata?.account_id;
+      if (pi.metadata?.kind === "credit_pack" && accountId) {
+        const [exists] = await sql`select 1 from accounts where id = ${accountId}`;
+        if (exists) {
+          await grantPack(sql, config, { accountId, paymentIntentId: pi.id, amountCents: pi.amount_received, currency: pi.currency });
+        }
+      }
+      return;
+    }
+    case "charge.refunded": {
+      const charge = event.data.object as Stripe.Charge;
+      const paymentIntentId = idOf(charge.payment_intent);
+      if (charge.refunded && paymentIntentId) await revokePack(sql, paymentIntentId);
       return;
     }
     default:
@@ -118,7 +159,7 @@ export function billingPublicRoutes(deps: Deps) {
       insert into stripe_events (id, type) values (${event.id}, ${event.type}) on conflict (id) do nothing returning id`;
     if (!fresh) return c.json({ received: true, duplicate: true });
     try {
-      await handleEvent(deps.sql, deps.billing, event);
+      await handleEvent(deps.sql, deps.billing, (await deps.config.current()).doc, event);
     } catch (err) {
       // Forget the event so Stripe's retry is handled, and answer 500 so it retries.
       await deps.sql`delete from stripe_events where id = ${event.id}`;
@@ -139,6 +180,7 @@ export function billingPublicRoutes(deps: Deps) {
 <script>location.href=${JSON.stringify(target)}</script></body></html>`;
 
   app.get("/return/success", (c) => c.html(returnPage("keel://billing/success", "You're all set. Returning to Keel…")));
+  app.get("/return/pack-success", (c) => c.html(returnPage("keel://billing/pack-success", "Credits added. Returning to Keel…")));
   app.get("/return/cancel", (c) => c.html(returnPage("keel://billing/cancel", "Checkout cancelled. Returning to Keel…")));
   app.get("/return/portal", (c) => c.html(returnPage("keel://billing/portal", "Returning to Keel…")));
 
@@ -149,11 +191,24 @@ export function billingPublicRoutes(deps: Deps) {
 export function billingRoutes(deps: Deps) {
   const app = new Hono<AppEnv>();
 
+  /** The account's Stripe customer, created on first use with the account id in its metadata. */
+  const customerFor = async (accountId: string) => {
+    const [account] = await deps.sql<{ email: string | null; email_relay: string | null; stripe_customer_id: string | null }[]>`
+      select email, email_relay, stripe_customer_id from accounts where id = ${accountId}`;
+    if (account!.stripe_customer_id) return account!.stripe_customer_id;
+    const created = await deps.billing!.createCustomer({ accountId, email: account!.email ?? account!.email_relay });
+    const [set] = await deps.sql<{ stripe_customer_id: string }[]>`
+      update accounts set stripe_customer_id = coalesce(stripe_customer_id, ${created}) where id = ${accountId}
+      returning stripe_customer_id`;
+    return set!.stripe_customer_id;
+  };
+
   app.get("/plans", async (c) => {
     const { accountId } = c.get("auth");
     const { doc } = await deps.config.current();
     const entitlement = await entitlementFor(deps.sql, accountId, doc);
     const prices = deps.billing ? await deps.billing.prices() : [];
+    const pack = deps.billing ? await deps.billing.packPrice() : null;
     return c.json({
       plans: [
         { id: "free", name: doc.plans.free?.name ?? "Free", prices: [] },
@@ -164,6 +219,12 @@ export function billingRoutes(deps: Deps) {
         },
       ],
       trialDays: doc.billing.trialDays,
+      trialCredits: doc.billing.trialCredits,
+      monthlyCredits: doc.plans.pro?.monthlyCredits ?? 0,
+      pack:
+        pack && pack.unitAmount !== null
+          ? { credits: doc.billing.pack.credits, amount: pack.unitAmount, currency: pack.currency }
+          : null,
       trialEligible: entitlement.trialEligible,
       current: entitlement,
       billingAvailable: !!deps.billing && prices.length > 0,
@@ -189,13 +250,7 @@ export function billingRoutes(deps: Deps) {
       throw new ApiError(409, "already_subscribed", "This account already has Pro. Manage it from the billing portal.");
     }
 
-    const [account] = await deps.sql<{ email: string | null; email_relay: string | null; stripe_customer_id: string | null }[]>`
-      select email, email_relay, stripe_customer_id from accounts where id = ${accountId}`;
-    let customerId = account!.stripe_customer_id;
-    if (!customerId) {
-      customerId = await deps.billing.createCustomer({ accountId, email: account!.email ?? account!.email_relay });
-      await deps.sql`update accounts set stripe_customer_id = ${customerId} where id = ${accountId} and stripe_customer_id is null`;
-    }
+    const customerId = await customerFor(accountId);
     const url = await deps.billing.createCheckout({
       customerId,
       priceId,
@@ -206,6 +261,50 @@ export function billingRoutes(deps: Deps) {
       cancelUrl: `${deps.publicBaseUrl}/v1/billing/return/cancel`,
     });
     return c.json({ url });
+  });
+
+  const PackBody = z.strictObject({ context: z.string().max(64).optional() });
+
+  app.post("/packs/checkout", async (c) => {
+    const { accountId } = c.get("auth");
+    const body = await parseJson(c, PackBody);
+    const { doc } = await deps.config.current();
+    const entitlement = await entitlementFor(deps.sql, accountId, doc);
+    if (entitlement.tier !== "pro") throw new ApiError(403, "plan_required", "Credit packs are part of Keel Pro");
+    if (entitlement.source === "trial") {
+      throw new ApiError(409, "packs_unavailable_during_trial", "Credit packs can be bought once the trial ends");
+    }
+    const priceId = deps.billing?.packPriceId();
+    if (!deps.billing || !priceId) throw unavailable();
+    const url = await deps.billing.createPackCheckout({
+      customerId: await customerFor(accountId),
+      priceId,
+      accountId,
+      context: body.context ?? null,
+      successUrl: `${deps.publicBaseUrl}/v1/billing/return/pack-success`,
+      cancelUrl: `${deps.publicBaseUrl}/v1/billing/return/cancel`,
+    });
+    return c.json({ url });
+  });
+
+  // "Start Pro now": ends the trial early, so billing and a fresh period of monthly credits start.
+  app.post("/trial/end", async (c) => {
+    if (!deps.billing) throw unavailable();
+    const { accountId } = c.get("auth");
+    const [sub] = await deps.sql<{ stripe_subscription_id: string }[]>`
+      select stripe_subscription_id from subscriptions
+      where account_id = ${accountId} and status = 'trialing' order by updated_at desc limit 1`;
+    if (!sub) throw new ApiError(409, "not_trialing", "There's no trial to end");
+    const updated = await deps.billing.endTrial(sub.stripe_subscription_id);
+    await syncSubscription(deps.sql, updated);
+    const { doc } = await deps.config.current();
+    const entitlement = await entitlementFor(deps.sql, accountId, doc);
+    const plan = await deps.plans.planFor(accountId, doc);
+    const period = await creditPeriod(deps.sql, accountId, plan, doc);
+    const credits = period
+      ? creditsSummary(doc, period, await creditBalance(deps.sql, accountId, period), canBuyPack(deps, entitlement))
+      : null;
+    return c.json({ entitlement, credits });
   });
 
   app.post("/portal", async (c) => {

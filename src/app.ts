@@ -12,7 +12,7 @@ import { log } from "./logger.js";
 import { appliedMigrations } from "./db/index.js";
 
 /** Bump when adding a file to migrations/. The health check fails until all are applied. */
-export const EXPECTED_MIGRATIONS = 2;
+export const EXPECTED_MIGRATIONS = 3;
 
 export function createApp(deps: Deps) {
   const app = new Hono<AppEnv>();
