@@ -141,3 +141,20 @@ describe("request shaping for vLLM", () => {
     expect(out.messages[2]!.content).toEqual([{ type: "text", text: "(thinking omitted)" }]);
   });
 });
+
+describe("env", () => {
+  it("treats empty self-hosted variables as unset", async () => {
+    const { loadEnv } = await import("../src/env.js");
+    const base = {
+      DATABASE_URL: "postgres://x",
+      ANTHROPIC_API_KEY: "k",
+      ACCESS_TOKEN_SECRET: "x".repeat(32),
+      PROJECT_HASH_SALT: "y".repeat(16),
+      APPLE_CLIENT_ID: "app",
+    };
+    const env = loadEnv({ ...base, SELF_HOSTED_BASE_URL: "", SELF_HOSTED_TOKEN: "" });
+    expect(env.SELF_HOSTED_BASE_URL).toBeUndefined();
+    expect(env.SELF_HOSTED_TOKEN).toBeUndefined();
+    expect(loadEnv({ ...base, SELF_HOSTED_BASE_URL: "http://1.2.3.4:41234" }).SELF_HOSTED_BASE_URL).toBe("http://1.2.3.4:41234");
+  });
+});
