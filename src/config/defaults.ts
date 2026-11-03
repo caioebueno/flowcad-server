@@ -97,7 +97,9 @@ export const DEFAULT_CONFIG: ConfigDoc = {
     taskProfiles: {
       ask: self(8_000, false),
       explain_more: self(8_000, false),
-      change: self(16_000, true),
+      // Part builds and edits force a tool, so the schema keeps ops valid;
+      // thinking only made them slow and could run past the output cap.
+      change: self(16_000, false),
       review: self(16_000, true),
       fix: self(16_000, true),
       advise: self(16_000, true),
