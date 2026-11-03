@@ -8,6 +8,18 @@ const opus = (p: Pick<TaskProfile, "effort" | "maxOutputTokens" | "taskBudgetTok
   ...p,
 });
 
+/** Qwen3.8-27B (FP8) on vLLM. vLLM ignores effort, budgets and Claude's thinking options. */
+const SELF_MODEL = "self:Qwen/Qwen3.8-27B-FP8";
+const self = (maxOutputTokens: number): TaskProfile => ({
+  model: SELF_MODEL,
+  effort: "high",
+  maxOutputTokens,
+  taskBudgetTokens: null,
+  thinkingUpdates: false,
+  refusalFallback: false,
+  mode: "live",
+});
+
 /**
  * Starting config from the spec's task profile table. The live config is the
  * newest row in `config_versions`; this is used only until one is published
@@ -43,6 +55,8 @@ export const DEFAULT_CONFIG: ConfigDoc = {
     "claude-opus-4-8": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
     "claude-sonnet-5-5": { input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2 },
     "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01 },
+    // Our own GPU, so not a per-token bill. Charged like Haiku to keep credits meaningful.
+    [SELF_MODEL]: { input: 0.1, output: 0.5, cacheWrite5m: 0.1, cacheWrite1h: 0.1, cacheRead: 0.01 },
   },
   // AI spec > Spec 8 (Nov 1): Pro is $39 a month or $390 a year (prices live in
   // Stripe) with 2,000 credits. "beta" and "internal" are hand-assigned and
@@ -72,4 +86,20 @@ export const DEFAULT_CONFIG: ConfigDoc = {
   minAppVersion: "0.0.0",
   features: {},
   enforceToolAllowlist: false,
+  // Primary model for every live task type once SELF_HOSTED_BASE_URL is set;
+  // Claude (taskProfiles above) is the fallback. 64K context on the server.
+  selfHosted: {
+    enabled: true,
+    taskProfiles: {
+      ask: self(8_000),
+      explain_more: self(8_000),
+      change: self(16_000),
+      review: self(16_000),
+      fix: self(16_000),
+      advise: self(16_000),
+      plan: self(16_000),
+      retry_high: self(16_000),
+      chore: self(1_000),
+    },
+  },
 };

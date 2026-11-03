@@ -123,6 +123,27 @@ on HTTP request duration before raising any profile above `high`.
 Errors before the stream starts are JSON with the status codes in the spec
 (401, 402, 403, 413, 422, 429, 502, 503). Errors mid stream arrive as `keel.error`.
 
+## Self-hosted model
+
+Agent turns go first to a self-hosted model (Qwen3.8-27B FP8 on vLLM, run on a
+Vast.ai GPU) when `SELF_HOSTED_BASE_URL` is set, and to Claude otherwise.
+
+- `SELF_HOSTED_BASE_URL`: the instance's vLLM API address, without `/v1`
+  (for example `http://<instance ip>:<external port for 8000>`).
+- `SELF_HOSTED_TOKEN`: sent as `Authorization: Bearer`. The Vast.ai portal token,
+  or the `--api-key` vLLM was started with.
+- Routing lives in remote config under `selfHosted`: `enabled`, optional `plans`
+  (absent means every Pro plan) and a profile per task type, with model names
+  starting `self:`. The defaults send every live task type there.
+- If the self-hosted model can't start a turn (instance stopped, error or no
+  response within 20 seconds), the turn runs on the task type's Claude profile
+  instead. Thinking blocks signed by vLLM are removed first, since Claude
+  rejects them.
+- Turns are priced from `prices["self:Qwen/Qwen3.8-27B-FP8"]`, set like Haiku.
+  `/agent/keepwarm` does nothing for self-hosted turns.
+- A config already published in `config_versions` has no `selfHosted` section,
+  so add one and publish it to turn this on.
+
 ## Remote config
 
 The live config is the newest row of `config_versions`; until one is published the

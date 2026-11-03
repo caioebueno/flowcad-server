@@ -51,6 +51,27 @@ export const PlanSchema = z.strictObject({
   monthlyCredits: z.number().int().nonnegative(),
 });
 
+/** Model names served by the self-hosted upstream (vLLM, e.g. on Vast.ai) start with this. */
+export const SELF_HOSTED_PREFIX = "self:";
+
+/**
+ * The self-hosted model as the primary model. Listed task types go to it
+ * first; a turn it can't start (box off, error before the stream) goes to the
+ * task type's Claude profile instead. Needs SELF_HOSTED_BASE_URL as well.
+ */
+export const SelfHostedSchema = z.strictObject({
+  enabled: z.boolean(),
+  /** Plans routed to it. Absent means every plan that can use the agent. */
+  plans: z.array(z.string()).optional(),
+  taskProfiles: z.partialRecord(
+    z.enum(TASK_TYPES),
+    TaskProfileSchema.refine((p) => p.model.startsWith(SELF_HOSTED_PREFIX), {
+      message: `Self-hosted model names start with "${SELF_HOSTED_PREFIX}"`,
+    }),
+  ),
+});
+export type SelfHosted = z.infer<typeof SelfHostedSchema>;
+
 export const ConfigDocSchema = z.strictObject({
   taskProfiles: z.record(z.enum(TASK_TYPES), TaskProfileSchema),
   prices: z.record(z.string(), ModelPriceSchema),
@@ -91,5 +112,7 @@ export const ConfigDocSchema = z.strictObject({
   minAppVersion: z.string(),
   features: z.record(z.string(), z.boolean()),
   enforceToolAllowlist: z.boolean(),
+  /** Off when absent. */
+  selfHosted: SelfHostedSchema.optional(),
 });
 export type ConfigDoc = z.infer<typeof ConfigDocSchema>;

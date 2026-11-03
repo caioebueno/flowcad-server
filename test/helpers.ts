@@ -174,7 +174,13 @@ export function signedWebhook(event: Record<string, unknown>) {
 }
 
 export function makeApp(
-  opts: { config?: ConfigDoc; upstream?: FakeUpstream; mailer?: FakeMailer; billing?: FakeBilling | null } = {},
+  opts: {
+    config?: ConfigDoc;
+    upstream?: FakeUpstream;
+    selfHosted?: FakeUpstream | null;
+    mailer?: FakeMailer;
+    billing?: FakeBilling | null;
+  } = {},
 ) {
   const upstream = opts.upstream ?? new FakeUpstream();
   const mailer = opts.mailer ?? new FakeMailer();
@@ -186,6 +192,7 @@ export function makeApp(
     accessTokens: new AccessTokens("test-secret-test-secret-test-secret-1234"),
     config: staticConfig(opts.config ?? DEFAULT_CONFIG),
     upstream,
+    selfHosted: opts.selfHosted ?? null,
     plans: new ConfigPlanProvider(db()),
     projectHashSalt: "test-salt-test-salt",
     emailCodes: new EmailCodes(db(), "test-code-secret"),
