@@ -7,6 +7,7 @@ import { attestationDisabled, attestationNotImplemented } from "./auth/attest.js
 import { AccessTokens } from "./auth/tokens.js";
 import { ConfigStore } from "./config/store.js";
 import { AnthropicUpstream } from "./proxy/upstream.js";
+import { SelfHostedUpstream } from "./proxy/selfHosted.js";
 import { ConfigPlanProvider } from "./billing/plans.js";
 import { log } from "./logger.js";
 import { EmailCodes } from "./auth/emailCodes.js";
@@ -45,6 +46,7 @@ const app = createApp({
   accessTokens: new AccessTokens(env.ACCESS_TOKEN_SECRET),
   config: new ConfigStore(sql),
   upstream: new AnthropicUpstream(env.ANTHROPIC_API_KEY),
+  selfHosted: env.SELF_HOSTED_BASE_URL ? new SelfHostedUpstream(env.SELF_HOSTED_BASE_URL, env.SELF_HOSTED_TOKEN) : null,
   plans: new ConfigPlanProvider(sql),
   projectHashSalt: env.PROJECT_HASH_SALT,
   emailCodes: new EmailCodes(sql, env.ACCESS_TOKEN_SECRET),

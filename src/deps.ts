@@ -17,6 +17,8 @@ export interface Deps {
   accessTokens: AccessTokens;
   config: ConfigSource;
   upstream: Upstream;
+  /** The self-hosted model; null or absent when SELF_HOSTED_BASE_URL isn't set. */
+  selfHosted?: Upstream | null;
   plans: PlanProvider;
   emailCodes: EmailCodes;
   mailer: Mailer;

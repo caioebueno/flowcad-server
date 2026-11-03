@@ -5,7 +5,9 @@ import type { AppEnv, Deps } from "../deps.js";
 import { ApiError } from "../errors.js";
 import { requireAttestation } from "../auth/middleware.js";
 import { checkAgainstProfile, rejectServerTools, TurnBody } from "./request.js";
-import { buildParams, mapUpstreamError, type StreamEvent } from "./upstream.js";
+import { buildParams, mapUpstreamError, type StreamEvent, type UpstreamParams } from "./upstream.js";
+import { dropSelfHostedThinking, selfHostedProfile } from "./selfHosted.js";
+import type { TaskProfile } from "../config/schema.js";
 import { priceUsage, StreamUsage } from "./usage.js";
 import { projectHash, recordUsage, runTotals } from "../ledger/ledger.js";
 import { creditBalance, creditPeriod, creditsLeft, isExhausted, isLow, microsPerCredit, type CreditPeriod } from "../billing/credits.js";
@@ -30,6 +32,8 @@ interface Prepared {
   usedMicros: number;
   extraMicros: number;
   profile: ReturnType<typeof checkAgainstProfile>;
+  /** Tried before `profile` when the self-hosted model is configured and on. */
+  selfProfile: TaskProfile | null;
 }
 
 /** Steps 1 to 3 of the proxy: size, shape, profile, plan and credits. */
@@ -68,7 +72,39 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
       canBuyPack: !period.isTrial && packsAvailable(deps),
     });
   }
-  return { body, config, plan, period, usedMicros: balance.monthlyUsedMicros, extraMicros: balance.extraMicros, profile };
+  const selfProfile = deps.selfHosted ? selfHostedProfile(config.doc, plan, body.taskType) : null;
+  return { body, config, plan, period, usedMicros: balance.monthlyUsedMicros, extraMicros: balance.extraMicros, profile, selfProfile };
+}
+
+/** Request options for a profile; the app's own cap never goes above the profile's. */
+function paramsFor(profile: TaskProfile, body: TurnBody): UpstreamParams {
+  const maxOutputTokens = body.maxOutputTokens ? Math.min(body.maxOutputTokens, profile.maxOutputTokens) : undefined;
+  return buildParams(profile, body.request, { effort: body.effort, maxOutputTokens });
+}
+
+/**
+ * Starts the turn on the self-hosted model when it applies, and on Claude
+ * otherwise or when the self-hosted model can't start it. Returns the profile
+ * that actually serves the turn, so it is priced and recorded under it.
+ */
+async function startTurn(
+  deps: Deps,
+  prepared: Pick<Prepared, "body" | "profile" | "selfProfile">,
+  signal: AbortSignal,
+  accountId: string,
+): Promise<{ events: AsyncIterable<StreamEvent>; served: TaskProfile }> {
+  const { body, profile, selfProfile } = prepared;
+  if (selfProfile && deps.selfHosted) {
+    try {
+      return { events: await deps.selfHosted.stream(paramsFor(selfProfile, body), signal), served: selfProfile };
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : "unknown";
+      log.warn("self_hosted_unavailable", { account: accountId, run: body.runId, code });
+    }
+  }
+  const claudeBody = { ...body, request: dropSelfHostedThinking(body.request) };
+  // Throws ApiError (502/503/413) before any byte is sent to the app.
+  return { events: await deps.upstream.stream(paramsFor(profile, claudeBody), signal), served: profile };
 }
 
 export function proxyRoutes(deps: Deps) {
@@ -82,7 +118,8 @@ export function proxyRoutes(deps: Deps) {
 
   app.post("/turn", limit, requireAttestation(deps), async (c) => {
     const started = Date.now();
-    const { body, config, period, usedMicros, extraMicros, profile } = await prepare(c, deps);
+    const prepared = await prepare(c, deps);
+    const { body, config, period, usedMicros, extraMicros } = prepared;
     const { accountId, deviceId } = c.get("auth");
     const limits = config.doc.limits;
 
@@ -103,10 +140,8 @@ export function proxyRoutes(deps: Deps) {
       });
     }
 
-    const params = buildParams(profile, body.request, { effort: body.effort, maxOutputTokens: body.maxOutputTokens });
     const abort = new AbortController();
-    // Throws ApiError (502/503/413) before any byte is sent to the app.
-    const events = await deps.upstream.stream(params, abort.signal);
+    const { events, served: profile } = await startTurn(deps, prepared, abort.signal, accountId);
 
     return streamSSE(c, async (s) => {
       s.onAbort(() => abort.abort());
@@ -215,8 +250,22 @@ export function proxyRoutes(deps: Deps) {
 
   app.post("/keepwarm", limit, requireAttestation(deps), async (c) => {
     const started = Date.now();
-    const { body, config, period, profile } = await prepare(c, deps);
+    const { body, config, period, profile, selfProfile, usedMicros, extraMicros } = await prepare(c, deps);
     const { accountId, deviceId } = c.get("auth");
+    if (selfProfile) {
+      // The next turn goes to the self-hosted model, whose cache warms itself:
+      // nothing to write to Claude's cache, nothing to charge.
+      return c.json({
+        inputTokens: 0,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 0,
+        outputTokens: 0,
+        costMicros: 0,
+        creditsCharged: 0,
+        creditsLeft: creditsLeft(config.doc, period, { monthlyUsedMicros: usedMicros, extraMicros }),
+        allowanceUsedPercent: percent(usedMicros, period.limitMicros),
+      });
+    }
     const params = buildParams(profile, body.request, { effort: body.effort, maxOutputTokens: body.maxOutputTokens });
     const usage = await deps.upstream.prewarm(params);
     const priced = priceUsage(config.doc, profile.model, usage as never);
