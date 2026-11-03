@@ -8,14 +8,18 @@ const opus = (p: Pick<TaskProfile, "effort" | "maxOutputTokens" | "taskBudgetTok
   ...p,
 });
 
-/** Qwen3.8-27B (FP8) on vLLM. vLLM ignores effort, budgets and Claude's thinking options. */
+/**
+ * Qwen3.8-27B (FP8) on vLLM. Effort and budgets don't apply there; on a
+ * self-hosted profile `thinkingUpdates` switches the model's thinking on.
+ * Edits need it to follow propose_changes; chat is fast without it.
+ */
 const SELF_MODEL = "self:Qwen/Qwen3.8-27B-FP8";
-const self = (maxOutputTokens: number): TaskProfile => ({
+const self = (maxOutputTokens: number, thinking: boolean): TaskProfile => ({
   model: SELF_MODEL,
   effort: "high",
   maxOutputTokens,
   taskBudgetTokens: null,
-  thinkingUpdates: false,
+  thinkingUpdates: thinking,
   refusalFallback: false,
   mode: "live",
 });
@@ -91,15 +95,15 @@ export const DEFAULT_CONFIG: ConfigDoc = {
   selfHosted: {
     enabled: true,
     taskProfiles: {
-      ask: self(8_000),
-      explain_more: self(8_000),
-      change: self(16_000),
-      review: self(16_000),
-      fix: self(16_000),
-      advise: self(16_000),
-      plan: self(16_000),
-      retry_high: self(16_000),
-      chore: self(1_000),
+      ask: self(8_000, false),
+      explain_more: self(8_000, false),
+      change: self(16_000, true),
+      review: self(16_000, true),
+      fix: self(16_000, true),
+      advise: self(16_000, true),
+      plan: self(16_000, true),
+      retry_high: self(16_000, true),
+      chore: self(1_000, false),
     },
   },
 };

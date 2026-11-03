@@ -134,7 +134,11 @@ Vast.ai GPU) when `SELF_HOSTED_BASE_URL` is set, and to Claude otherwise.
   or the `--api-key` vLLM was started with.
 - Routing lives in remote config under `selfHosted`: `enabled`, optional `plans`
   (absent means every Pro plan) and a profile per task type, with model names
-  starting `self:`. The defaults send every live task type there.
+  starting `self:`. The defaults send every live task type there. On these
+  profiles `thinkingUpdates` turns Qwen's thinking on for that request
+  (`chat_template_kwargs.enable_thinking`): on for edits, parts and plans,
+  off for `ask`, `explain_more` and `chore`, so run vLLM with thinking off by
+  default (`--default-chat-template-kwargs '{"enable_thinking": false}'`).
 - If the self-hosted model can't start a turn (instance stopped, error or no
   response within 20 seconds), the turn runs on the task type's Claude profile
   instead. Thinking blocks signed by vLLM are removed first, since Claude

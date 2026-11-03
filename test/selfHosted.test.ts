@@ -30,8 +30,11 @@ describe("self-hosted model as primary", () => {
     const p = selfHosted.calls[0] as unknown as Record<string, unknown>;
     expect(p.model).toBe(SELF);
     expect(p.max_tokens).toBe(16_000);
-    expect(p.thinking).toBeUndefined();
-    expect(p.fallbacks).toBeUndefined();
+    // What actually goes to vLLM: no Claude-only fields, Qwen's thinking on for an edit.
+    const sent = toSelfHostedParams(selfHosted.calls[0]!);
+    expect(sent.thinking).toBeUndefined();
+    expect(sent.fallbacks).toBeUndefined();
+    expect(sent.chat_template_kwargs).toEqual({ enable_thinking: true });
 
     // Priced like Haiku: $0.10 in, $0.50 out per MTok.
     const expected = 1000 * 0.1 + 200 * 0.5;
@@ -122,6 +125,7 @@ describe("request shaping for vLLM", () => {
     );
     const out = toSelfHostedParams(params);
     expect(out.model).toBe("Qwen/Qwen3.8-27B-FP8");
+    expect(out.chat_template_kwargs).toEqual({ enable_thinking: true });
     for (const k of ["betas", "output_config", "thinking", "fallbacks"]) expect(out[k]).toBeUndefined();
     expect(JSON.stringify(out)).not.toContain("cache_control");
     expect(JSON.stringify(out)).not.toContain("redacted_thinking");
@@ -139,6 +143,15 @@ describe("request shaping for vLLM", () => {
     const out = dropSelfHostedThinking(req);
     expect(out.messages[1]!.content).toHaveLength(2);
     expect(out.messages[2]!.content).toEqual([{ type: "text", text: "(thinking omitted)" }]);
+  });
+});
+
+describe("thinking per task type", () => {
+  it("is on for edits and off for chat", () => {
+    const req = { messages: [{ role: "user" as const, content: "hi" }] };
+    const sh = DEFAULT_CONFIG.selfHosted!.taskProfiles;
+    expect(toSelfHostedParams(buildParams(sh.change!, req)).chat_template_kwargs).toEqual({ enable_thinking: true });
+    expect(toSelfHostedParams(buildParams(sh.ask!, req)).chat_template_kwargs).toEqual({ enable_thinking: false });
   });
 });
 
