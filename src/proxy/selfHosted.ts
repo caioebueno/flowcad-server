@@ -22,6 +22,9 @@ function stripCacheControl(value: unknown): unknown {
 /** Turns Claude-shaped params into what vLLM's /v1/messages accepts. */
 export function toSelfHostedParams(params: UpstreamParams): Record<string, unknown> {
   const out = { ...(params as unknown as Record<string, unknown>) };
+  // The profile's thinking setting becomes Qwen's chat template switch, per
+  // request, whatever the server's default is.
+  out.chat_template_kwargs = { enable_thinking: out.thinking !== undefined };
   for (const k of CLAUDE_ONLY) delete out[k];
   out.model = String(out.model).slice(SELF_HOSTED_PREFIX.length);
   for (const k of ["system", "tools", "messages"]) if (out[k] !== undefined) out[k] = stripCacheControl(out[k]);
