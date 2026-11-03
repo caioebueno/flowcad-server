@@ -35,9 +35,21 @@ const Message = z.object({
  * strips), so the app can't sneak in model, thinking, output_config,
  * fallbacks or similar: those come from the task profile.
  */
+/**
+ * Which tool the model must call. Forcing a tool makes the self-hosted model
+ * decode its arguments against the tool's input_schema, so enums hold.
+ */
+const ToolChoice = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("auto") }),
+  z.strictObject({ type: z.literal("any") }),
+  z.strictObject({ type: z.literal("tool"), name: z.string().min(1).max(128) }),
+]);
+export type ToolChoice = z.infer<typeof ToolChoice>;
+
 export const ModelRequest = z.object({
   system: z.union([z.string(), z.array(SystemBlock)]).optional(),
   tools: z.array(Tool).max(64).optional(),
+  tool_choice: ToolChoice.optional(),
   messages: z.array(Message).min(1),
 });
 export type ModelRequest = z.infer<typeof ModelRequest>;
@@ -111,6 +123,14 @@ export function checkAgainstProfile(body: TurnBody, config: ConfigDoc): TaskProf
       if (!expected) throw outsideProfile("Tool not allowed for this task type", { tool: tool.name });
       if (expected !== toolHash(tool)) throw outsideProfile("Tool schema does not match the allowlist", { tool: tool.name });
     }
+  }
+
+  const choice = body.request.tool_choice;
+  if (choice && choice.type !== "auto" && !body.request.tools?.length) {
+    throw outsideProfile("tool_choice needs tools");
+  }
+  if (choice?.type === "tool" && !body.request.tools?.some((t) => t.name === choice.name)) {
+    throw outsideProfile("tool_choice names a tool that isn't in tools", { tool: choice.name });
   }
 
   let breakpoints = 0;

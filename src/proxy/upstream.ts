@@ -5,7 +5,7 @@ import type {
   BetaRawMessageStreamEvent,
   BetaUsage,
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
-import type { Effort, TaskProfile } from "../config/schema.js";
+import { SELF_HOSTED_PREFIX, type Effort, type TaskProfile } from "../config/schema.js";
 import { ApiError } from "../errors.js";
 import type { ModelRequest } from "./request.js";
 
@@ -48,6 +48,13 @@ export function buildParams(
   };
   if (req.system !== undefined) params.system = req.system;
   if (req.tools?.length) params.tools = req.tools;
+  // Claude refuses a forced tool while thinking, so there the choice is left
+  // to the model. The self-hosted model takes it: vLLM then constrains the
+  // tool's arguments to its schema.
+  const forced = req.tool_choice && req.tool_choice.type !== "auto";
+  if (req.tool_choice && req.tools?.length && (!forced || !profile.thinkingUpdates || profile.model.startsWith(SELF_HOSTED_PREFIX))) {
+    params.tool_choice = req.tool_choice;
+  }
   if (profile.thinkingUpdates) {
     params.thinking = { type: "adaptive", display: "updates" };
     betas.push(BETA_THINKING_UPDATES);

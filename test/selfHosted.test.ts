@@ -171,3 +171,35 @@ describe("env", () => {
     expect(loadEnv({ ...base, SELF_HOSTED_BASE_URL: "http://1.2.3.4:41234" }).SELF_HOSTED_BASE_URL).toBe("http://1.2.3.4:41234");
   });
 });
+
+describe("forced tool choice", () => {
+  const tool = { name: "propose_changes", input_schema: { type: "object" } };
+  const forced = { type: "tool" as const, name: "propose_changes" };
+
+  it("reaches the self-hosted model, and is dropped when the turn falls back to a thinking Claude", async () => {
+    const selfHosted = new FakeUpstream();
+    selfHosted.failWith = new ApiError(503, "upstream_unavailable", "down");
+    const { app, upstream } = makeApp({ selfHosted });
+    const s = await signIn(app);
+    const res = await turn(app, s.accessToken, turnBody({}, { tools: [tool], tool_choice: forced }));
+    expect(res.status).toBe(200);
+    await readSse(res);
+
+    const toSelf = toSelfHostedParams(selfHosted.calls[0]!);
+    expect(toSelf.tool_choice).toEqual(forced);
+    expect((upstream.calls[0] as unknown as Record<string, unknown>).tool_choice).toBeUndefined();
+  });
+
+  it("is kept for Claude when the profile doesn't think", () => {
+    const profile = { ...DEFAULT_CONFIG.taskProfiles.chore, thinkingUpdates: false };
+    const p = buildParams(profile, { tools: [tool], tool_choice: forced, messages: [{ role: "user", content: "x" }] });
+    expect((p as unknown as Record<string, unknown>).tool_choice).toEqual(forced);
+  });
+
+  it("rejects a choice naming a tool that isn't sent", async () => {
+    const { app } = makeApp({ selfHosted: new FakeUpstream() });
+    const s = await signIn(app);
+    const res = await turn(app, s.accessToken, turnBody({}, { tools: [tool], tool_choice: { type: "tool", name: "nope" } }));
+    expect(res.status).toBe(422);
+  });
+});
