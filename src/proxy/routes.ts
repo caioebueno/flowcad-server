@@ -142,15 +142,18 @@ export function proxyRoutes(deps: Deps) {
 
     const abort = new AbortController();
     const { events, served: profile } = await startTurn(deps, prepared, abort.signal, accountId);
+    const upstreamStartedMs = Date.now() - started;
 
     return streamSSE(c, async (s) => {
       s.onAbort(() => abort.abort());
       const usage = new StreamUsage();
       let stopReason: string | null = null;
       let failed = false;
+      let firstTokenMs: number | null = null;
 
       try {
         for await (const event of events as AsyncIterable<StreamEvent>) {
+          if (firstTokenMs === null && event.type === "content_block_delta") firstTokenMs = Date.now() - started;
           usage.observe(event as never);
           await s.writeSSE({ event: event.type, data: JSON.stringify(event) });
           if (s.aborted) break;
@@ -213,6 +216,12 @@ export function proxyRoutes(deps: Deps) {
         cost: priced.costMicros,
         stop: stopReason,
         ms: latencyMs,
+        // Where the time went: which model served it, how long until it
+        // started (a self-hosted wait shows here) and how fast it wrote.
+        model: profile.model,
+        startMs: upstreamStartedMs,
+        firstTokenMs,
+        tokensPerSec: firstTokenMs !== null && latencyMs > firstTokenMs ? Math.round((priced.outputTokens * 1000) / (latencyMs - firstTokenMs)) : null,
       });
 
       if (s.aborted) return;
@@ -229,6 +238,7 @@ export function proxyRoutes(deps: Deps) {
           outputTokens: priced.outputTokens,
           costMicros: priced.costMicros,
           servedModel: priced.servedModel,
+          model: profile.model,
           creditsCharged: creditsCharged(priced.costMicros, microsPerCredit(config.doc)),
           creditsLeft: left,
           resetsAt,
