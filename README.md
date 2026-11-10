@@ -128,6 +128,9 @@ Errors before the stream starts are JSON with the status codes in the spec
 Agent turns go first to a self-hosted model (Qwen3.8-27B FP8 on vLLM, run on a
 Vast.ai GPU) when `SELF_HOSTED_BASE_URL` is set, and to Claude otherwise.
 
+To start the instance, set it up for the first time, or fix it, see
+[docs/vast-ai.md](docs/vast-ai.md).
+
 - `SELF_HOSTED_BASE_URL`: the instance's vLLM API address, without `/v1`
   (for example `http://<instance ip>:<external port for 8000>`).
 - `SELF_HOSTED_TOKEN`: sent as `Authorization: Bearer`. The Vast.ai portal token,
