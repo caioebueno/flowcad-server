@@ -53,6 +53,16 @@ function priceOf(config: ConfigDoc, model: string): ModelPrice {
   return Object.values(config.prices).reduce((a, b) => (b.output > a.output ? b : a));
 }
 
+/**
+ * The most a turn can cost, for holding credits back while it runs: every
+ * input token priced as a 1-hour cache write (the dearest input) and the full
+ * output cap.
+ */
+export function worstCaseMicros(config: ConfigDoc, model: string, inputTokens: number, maxOutputTokens: number): number {
+  const p = priceOf(config, model);
+  return Math.ceil(inputTokens * Math.max(p.input, p.cacheWrite5m, p.cacheWrite1h) + maxOutputTokens * p.output);
+}
+
 /** Cost in micro dollars. Prices are USD per million tokens, i.e. micro dollars per token. */
 export function costMicros(t: TokenUsage, p: ModelPrice): number {
   return (
@@ -103,18 +113,64 @@ export function priceUsage(config: ConfigDoc, requestedModel: string, usage: Usa
 }
 
 /**
+ * Characters of streamed output per token, for estimating output when the
+ * final usage never arrives. Real text runs about 4; 3 errs towards charging
+ * what Anthropic billed rather than less.
+ */
+export const CHARS_PER_OUTPUT_TOKEN_ESTIMATE = 3;
+
+/**
+ * Thinking streams as a summary ("display: updates"), far shorter than the
+ * thinking tokens billed, so when thinking was seen the estimate is at least
+ * this many tokens per second of streaming (a slow rate for Claude's output).
+ */
+export const THINKING_TOKENS_PER_SECOND_FLOOR = 40;
+
+/**
  * Collects the usage block from a stream. `message_start` carries the input
  * side; each `message_delta` carries cumulative totals, so the latest non-null
  * value of each field wins.
+ *
+ * Output tokens are only reported in `message_delta`, at the end. When the
+ * stream stops before that (the app disconnected, or the stream broke),
+ * Anthropic has still billed what it generated, so the output is estimated
+ * from the text, thinking and tool input streamed so far, and, when the model
+ * was thinking, from how long it streamed. The estimate never goes above the
+ * turn's output cap.
  */
 export class StreamUsage {
   private usage: UsageLike = {};
+  private finalOutput = false;
+  private streamedChars = 0;
+  private sawThinking = false;
+  private firstAt: number | null = null;
   stopReason: string | null = null;
 
-  observe(event: { type: string; message?: { usage?: UsageLike }; usage?: UsageLike; delta?: { stop_reason?: string | null } }) {
+  constructor(
+    private readonly maxOutputTokens = Infinity,
+    private readonly clock: () => number = Date.now,
+  ) {}
+
+  observe(event: {
+    type: string;
+    message?: { usage?: UsageLike };
+    usage?: UsageLike;
+    delta?: { stop_reason?: string | null; type?: string; text?: string; thinking?: string; partial_json?: string; signature?: string };
+  }) {
+    if (this.firstAt === null) this.firstAt = this.clock();
     if (event.type === "message_start" && event.message?.usage) this.merge(event.message.usage);
+    if (event.type === "content_block_start" && (event as { content_block?: { type?: string } }).content_block?.type?.includes("thinking")) {
+      this.sawThinking = true;
+    }
+    if (event.type === "content_block_delta" && event.delta) {
+      const d = event.delta;
+      this.streamedChars += (d.text?.length ?? 0) + (d.thinking?.length ?? 0) + (d.partial_json?.length ?? 0);
+    }
     if (event.type === "message_delta") {
-      if (event.usage) this.merge(event.usage);
+      if (event.usage) {
+        this.merge(event.usage);
+        if (typeof event.usage.output_tokens === "number") this.finalOutput = true;
+      }
       if (event.delta?.stop_reason) this.stopReason = event.delta.stop_reason;
     }
   }
@@ -125,7 +181,18 @@ export class StreamUsage {
     }
   }
 
+  /** True when the stream ended before its final usage, so output tokens are an estimate. */
+  get outputEstimated(): boolean {
+    return !this.finalOutput;
+  }
+
   get raw(): UsageLike {
-    return this.usage;
+    if (this.finalOutput) return this.usage;
+    let estimate = Math.ceil(this.streamedChars / CHARS_PER_OUTPUT_TOKEN_ESTIMATE);
+    if (this.sawThinking && this.firstAt !== null) {
+      estimate = Math.max(estimate, Math.ceil(((this.clock() - this.firstAt) / 1000) * THINKING_TOKENS_PER_SECOND_FLOOR));
+    }
+    estimate = Math.min(estimate, this.maxOutputTokens);
+    return { ...this.usage, output_tokens: Math.max(this.usage.output_tokens ?? 0, estimate) };
   }
 }

@@ -152,6 +152,7 @@ export class FakeBilling implements BillingGateway {
   }
   async createCheckout(input: CheckoutInput) {
     this.checkouts.push(input);
+    this.openCheckouts.set(input.customerId, (this.openCheckouts.get(input.customerId) ?? 0) + 1);
     return "https://checkout.stripe.com/c/pay/test";
   }
   async createPortal() {
@@ -161,6 +162,23 @@ export class FakeBilling implements BillingGateway {
     const sub = this.subscriptions.get(id);
     if (!sub) throw new Error(`no subscription ${id}`);
     return sub;
+  }
+  cancelled: string[] = [];
+  async cancelSubscription(id: string) {
+    this.cancelled.push(id);
+    const sub = await this.retrieveSubscription(id);
+    const next = { ...sub, status: "canceled" } as Stripe.Subscription;
+    this.subscriptions.set(id, next);
+    return next;
+  }
+  /** Open Checkout sessions per customer; each createCheckout opens one, expireOpenCheckouts closes them. */
+  openCheckouts = new Map<string, number>();
+  expiredCheckouts = 0;
+  async expireOpenCheckouts(customerId: string) {
+    const n = this.openCheckouts.get(customerId) ?? 0;
+    this.openCheckouts.set(customerId, 0);
+    this.expiredCheckouts += n;
+    return n;
   }
   verifyWebhook(raw: string, signature: string) {
     return stripeForSigning.webhooks.constructEventAsync(raw, signature, WEBHOOK_SECRET);
