@@ -28,21 +28,24 @@ export class EmailCodes {
    */
   async issue(opts: { email: string; purpose: CodePurpose; ip: string; deviceId?: string; accountId?: string }): Promise<string> {
     const { email, purpose, ip } = opts;
-    const [counts] = await this.sql<{ per_email: number; per_ip: number; last_seconds: number | null }[]>`
-      select
-        (select count(*)::bigint from email_codes where email = ${email} and created_at > now() - interval '1 hour') as per_email,
-        (select count(*)::bigint from email_codes where ip = ${ip} and created_at > now() - interval '1 hour') as per_ip,
-        (select extract(epoch from now() - max(created_at))::float8 from email_codes where email = ${email}) as last_seconds`;
-    if (counts!.last_seconds !== null && counts!.last_seconds < RESEND_COOLDOWN_SECONDS) {
-      const retryAfter = Math.ceil(RESEND_COOLDOWN_SECONDS - counts!.last_seconds);
-      throw new ApiError(429, "rate_limited", "Wait before asking for another code", { retryAfter });
-    }
-    if (counts!.per_email >= MAX_CODES_PER_EMAIL_PER_HOUR || counts!.per_ip >= MAX_CODES_PER_IP_PER_HOUR) {
-      throw new ApiError(429, "rate_limited", "Too many codes sent. Try again later.", { retryAfter: 600 });
-    }
-
     const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
     await this.sql.begin(async (tx) => {
+      // Requests for one email, or from one IP, are checked and written one at a
+      // time, so sends that race each other can't all pass the limits.
+      await tx`select pg_advisory_xact_lock(hashtext(${`email-code:email:${email}`}))`;
+      await tx`select pg_advisory_xact_lock(hashtext(${`email-code:ip:${ip}`}))`;
+      const [counts] = await tx<{ per_email: number; per_ip: number; last_seconds: number | null }[]>`
+        select
+          (select count(*)::bigint from email_codes where email = ${email} and created_at > now() - interval '1 hour') as per_email,
+          (select count(*)::bigint from email_codes where ip = ${ip} and created_at > now() - interval '1 hour') as per_ip,
+          (select extract(epoch from now() - max(created_at))::float8 from email_codes where email = ${email}) as last_seconds`;
+      if (counts!.last_seconds !== null && counts!.last_seconds < RESEND_COOLDOWN_SECONDS) {
+        const retryAfter = Math.ceil(RESEND_COOLDOWN_SECONDS - counts!.last_seconds);
+        throw new ApiError(429, "rate_limited", "Wait before asking for another code", { retryAfter });
+      }
+      if (counts!.per_email >= MAX_CODES_PER_EMAIL_PER_HOUR || counts!.per_ip >= MAX_CODES_PER_IP_PER_HOUR) {
+        throw new ApiError(429, "rate_limited", "Too many codes sent. Try again later.", { retryAfter: 600 });
+      }
       await tx`update email_codes set used_at = now() where email = ${email} and used_at is null`;
       await tx`
         insert into email_codes (email, code_hash, purpose, account_id, device_id, ip, expires_at)

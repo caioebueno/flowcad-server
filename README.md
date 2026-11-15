@@ -27,7 +27,8 @@ billing with AI credits and credit packs), plus remote config from phase 2.
 | `GET /config` | Done. Versioned in `config_versions`, served with an ETag |
 | AI credits | Done. 2,000 a billing period on Pro, 1,000 for the trial, packs used after; `credits_low` warning at 20% left, `402 credits_exhausted` at zero. Contract: `/mnt/project-files/keel-account-service/api-pro-and-credits.md` |
 | App Attest | Interface and middleware in place, off by default (phase 2) |
-| Rate limits on turns and Apple sign-ins | Values served in config, not enforced yet (phase 2) |
+| Limits on agent turns | Done. Each turn holds back its worst-case cost while it streams, so turns sent at once can't spend credits that aren't there (only one turn can run past the end of the credits); `concurrentRuns` turns in flight and `turnsPerMinute` per account, else `429 rate_limited`. Turns that failed before a reply don't use up a run |
+| Rate limits on Apple sign-ins | Value served in config, not enforced yet (phase 2) |
 | Overnight reviews (`/batches`) and push | Not started (phase 3). The `overnight_review` profile already exists |
 
 ## Plans
@@ -41,8 +42,10 @@ billing with AI credits and credit packs), plus remote config from phase 2.
 Credits per plan live in remote config (`plans[].monthlyCredits`), with the credit rate in
 `credits.perDollar` (150, so one credit is 1/150 of a dollar of model cost), and the trial and
 pack in `billing` (`trialDays` 15, `trialCredits` 1,000, `pack` 1,000 credits lasting 12 months).
-Stripe plans get fresh credits at the start of each billing period; hand-assigned plans on the
-1st of each month. Pack credits sit in `credit_grants` and are spent after the monthly ones,
+Stripe plans get fresh credits every month, counted from the start of the billing period (a
+yearly price gets its 2,000 each month of the year); hand-assigned plans on the 1st of each month.
+While a payment is failing (`past_due`) Pro stays on, but the unpaid period's monthly credits wait
+until Stripe collects it; pack credits still work. Pack credits sit in `credit_grants` and are spent after the monthly ones,
 soonest expiry first. Prices ($39 a month, $390 a year, $10 a pack) live in Stripe.
 
 ## Running locally
@@ -131,8 +134,10 @@ Vast.ai GPU) when `SELF_HOSTED_BASE_URL` is set, and to Claude otherwise.
 To start the instance, set it up for the first time, or fix it, see
 [docs/vast-ai.md](docs/vast-ai.md).
 
-- `SELF_HOSTED_BASE_URL`: the instance's vLLM API address, without `/v1`
-  (for example `http://<instance ip>:<external port for 8000>`).
+- `SELF_HOSTED_BASE_URL`: the instance's vLLM API address, without `/v1`. In
+  production it must be `https://` (the server refuses to start otherwise),
+  because prompts, replies and the token would otherwise cross the internet in
+  the clear: put a TLS tunnel in front of port 8000 (see docs/vast-ai.md).
 - `SELF_HOSTED_TOKEN`: sent as `Authorization: Bearer`. The Vast.ai portal token,
   or the `--api-key` vLLM was started with.
 - Routing lives in remote config under `selfHosted`: `enabled`, optional `plans`

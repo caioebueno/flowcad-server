@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { AppEnv, Deps } from "../deps.js";
 import type { Sql } from "../db/index.js";
+import { rateLimitIp } from "../util/clientIp.js";
 import { ApiError } from "../errors.js";
 import { parseJson } from "../util/validate.js";
 import { IdentityTokenError } from "./apple.js";
@@ -142,7 +143,7 @@ export function authRoutes(deps: Deps) {
   app.post("/email/start", async (c) => {
     const body = await parseJson(c, EmailStartBody);
     const email = normaliseEmail(body.email);
-    const code = await deps.emailCodes.issue({ email, purpose: "sign_in", ip: clientIp(c), deviceId: body.device.id });
+    const code = await deps.emailCodes.issue({ email, purpose: "sign_in", ip: rateLimitIp(c), deviceId: body.device.id });
     try {
       await deps.mailer.sendSignInCode({ to: email, code });
     } catch (err) {
@@ -204,7 +205,7 @@ export function linkEmailRoutes(deps: Deps) {
     const email = normaliseEmail((await parseJson(c, Body)).email);
     const [owner] = await deps.sql<{ id: string }[]>`select id from accounts where email = ${email}`;
     if (owner && owner.id !== accountId) throw new ApiError(409, "email_taken", "That email belongs to another Keel account");
-    const code = await deps.emailCodes.issue({ email, purpose: "link", ip: clientIp(c), accountId });
+    const code = await deps.emailCodes.issue({ email, purpose: "link", ip: rateLimitIp(c), accountId });
     await deps.mailer.sendSignInCode({ to: email, code }).catch(() => {
       throw new ApiError(503, "upstream_unavailable", "Couldn't send the email. Try again in a moment.");
     });

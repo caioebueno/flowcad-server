@@ -17,7 +17,7 @@ common problems.
 ## How the pieces fit
 
 ```
-Keel (Mac) ──> flowcad-server (Railway) ──> http://<instance ip>:<port>  ──> Caddy (token check) ──> vLLM on 127.0.0.1:18000
+Keel (Mac) ──> flowcad-server (Railway) ──> https://<TLS tunnel>  ──> Caddy (token check) ──> vLLM on 127.0.0.1:18000
                          │
                          └──> Claude, if the instance is off or doesn't answer within 20 seconds
 ```
@@ -101,16 +101,25 @@ about "no registered multimodal processor" or FP8 KV-cache scales is harmless.
 
 ### 4. Connect it to this server
 
-1. **Base URL.** On the instance card, click the **IP** button (IP & ports). Find
-   the line ending in `-> 8000/tcp`, for example `203.0.113.5:41234 -> 8000/tcp`.
-   The base URL is `http://203.0.113.5:41234`, with no `/v1` at the end.
+1. **Base URL.** In production this must be an `https://` address: the server
+   refuses to start with a plain `http://` one, because every prompt, reply and
+   the token would cross the internet unencrypted. Put a TLS tunnel in front of
+   the portal's port 8000, for example from the instance's **Jupyter Terminal**:
+   ```sh
+   cloudflared tunnel --url http://localhost:8000
+   ```
+   and use the `https://….trycloudflare.com` address it prints (or a named
+   tunnel on your own domain, Tailscale Funnel, or the portal's HTTPS endpoint).
+   No `/v1` at the end. For a quick local test only, the plain address works
+   outside production: on the instance card, click the **IP** button and find
+   the line ending in `-> 8000/tcp`, for example `http://203.0.113.5:41234`.
 2. **Token.** In the portal's **Jupyter Terminal**, run:
    ```sh
    echo $OPEN_BUTTON_TOKEN
    ```
 3. **Check both from your Mac:**
    ```sh
-   curl -i http://<ip>:<port>/v1/models -H "Authorization: Bearer <token>"
+   curl -i <base url>/v1/models -H "Authorization: Bearer <token>"
    ```
    A `200` with JSON listing `Qwen/Qwen3.8-27B-FP8` means both are right. A
    `302`, `401` or an HTML login page means the token is wrong.

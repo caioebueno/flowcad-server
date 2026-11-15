@@ -8,8 +8,8 @@ import { checkAgainstProfile, rejectServerTools, TurnBody } from "./request.js";
 import { buildParams, mapUpstreamError, type StreamEvent, type UpstreamParams } from "./upstream.js";
 import { dropSelfHostedThinking, selfHostedProfile } from "./selfHosted.js";
 import type { TaskProfile } from "../config/schema.js";
-import { priceUsage, StreamUsage } from "./usage.js";
-import { projectHash, recordUsage, runTotals } from "../ledger/ledger.js";
+import { priceUsage, StreamUsage, worstCaseMicros } from "./usage.js";
+import { projectHash, recordUsage, releaseTurn, reserveTurn } from "../ledger/ledger.js";
 import { creditBalance, creditPeriod, creditsLeft, isExhausted, isLow, microsPerCredit, type CreditPeriod } from "../billing/credits.js";
 import { packsAvailable } from "../billing/entitlement.js";
 import { log } from "../logger.js";
@@ -26,6 +26,7 @@ const creditsCharged = (costMicros: number, mpc: number) => (costMicros <= 0 ? 0
 
 interface Prepared {
   body: TurnBody;
+  bodyBytes: number;
   config: LoadedConfig;
   plan: Plan;
   period: CreditPeriod;
@@ -40,7 +41,8 @@ interface Prepared {
 async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
   const config = await deps.config.current();
   const text = await c.req.text();
-  if (Buffer.byteLength(text) > config.doc.limits.maxBodyBytes) {
+  const bodyBytes = Buffer.byteLength(text);
+  if (bodyBytes > config.doc.limits.maxBodyBytes) {
     throw new ApiError(413, "request_too_large", "Request over the size limit", { maxBytes: config.doc.limits.maxBodyBytes });
   }
   let raw: unknown;
@@ -65,15 +67,32 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
   if (plan.tier !== "pro") throw new ApiError(403, "plan_required", "The agent is part of Keel Pro");
   const period = (await creditPeriod(deps.sql, accountId, plan, config.doc))!;
   const balance = await creditBalance(deps.sql, accountId, period);
-  if (isExhausted(period, balance)) {
-    throw new ApiError(402, "credits_exhausted", "You're out of AI credits", {
-      isTrial: period.isTrial,
-      resetsAt: period.end.toISOString(),
-      canBuyPack: !period.isTrial && packsAvailable(deps),
-    });
-  }
+  if (isExhausted(period, balance)) throw creditsExhausted(deps, period);
   const selfProfile = deps.selfHosted ? selfHostedProfile(config.doc, plan, body.taskType) : null;
-  return { body, config, plan, period, usedMicros: balance.monthlyUsedMicros, extraMicros: balance.extraMicros, profile, selfProfile };
+  return { body, bodyBytes, config, plan, period, usedMicros: balance.monthlyUsedMicros, extraMicros: balance.extraMicros, profile, selfProfile };
+}
+
+const creditsExhausted = (deps: Deps, period: CreditPeriod) =>
+  new ApiError(402, "credits_exhausted", "You're out of AI credits", {
+    isTrial: period.isTrial,
+    resetsAt: period.end.toISOString(),
+    canBuyPack: !period.isTrial && packsAvailable(deps),
+    ...(period.paymentFailed ? { paymentFailed: true } : {}),
+  });
+
+/** About 3 bytes of request JSON a token, which overestimates for text and far overestimates for images. */
+const BYTES_PER_TOKEN_ESTIMATE = 3;
+
+/** What a turn could cost at most, on whichever model may serve it. */
+function reservationFor(prepared: Prepared): number {
+  const { body, bodyBytes, config, profile, selfProfile } = prepared;
+  const inputTokens = Math.ceil(bodyBytes / BYTES_PER_TOKEN_ESTIMATE);
+  return Math.max(
+    ...[profile, selfProfile].filter((p): p is TaskProfile => !!p).map((p) => {
+      const maxOut = body.maxOutputTokens ? Math.min(body.maxOutputTokens, p.maxOutputTokens) : p.maxOutputTokens;
+      return worstCaseMicros(config.doc, p.model, inputTokens, maxOut);
+    }),
+  );
 }
 
 /** Request options for a profile; the app's own cap never goes above the profile's. */
@@ -123,10 +142,39 @@ export function proxyRoutes(deps: Deps) {
     const { accountId, deviceId } = c.get("auth");
     const limits = config.doc.limits;
 
-    const run = await runTotals(deps.sql, accountId, body.runId);
-    const runLimit =
-      run.turns >= limits.maxTurnsPerRun ? "turns" : run.costMicros >= limits.maxCostPerRunMicros ? "cost" : null;
-    if (runLimit) {
+    const hashedProject = projectHash(deps.projectHashSalt, accountId, body.projectId);
+
+    // Admit the turn and hold back what it could cost, so turns sent at the
+    // same time can't spend credits the account doesn't have (see reserveTurn).
+    const reservation = await reserveTurn(
+      deps.sql,
+      {
+        accountId,
+        deviceId,
+        projectHash: hashedProject,
+        threadId: body.threadId,
+        runId: body.runId,
+        turnIndex: body.turnIndex,
+        taskType: body.taskType,
+        model: prepared.profile.model,
+        configVersion: config.version,
+      },
+      reservationFor(prepared),
+      period,
+      limits,
+    );
+    if (!reservation.ok && reservation.reason === "credits_exhausted") throw creditsExhausted(deps, period);
+    if (!reservation.ok && reservation.reason !== "run_limit_reached") {
+      log.warn("turn_rate_limited", { account: accountId, run: body.runId, reason: reservation.reason });
+      throw new ApiError(
+        429,
+        "rate_limited",
+        reservation.reason === "too_many_in_flight" ? "Too many agent turns at once. Try again in a moment." : "Too many agent turns. Try again in a moment.",
+        { reason: reservation.reason, retryAfter: reservation.reason === "too_many_in_flight" ? 5 : 60 },
+      );
+    }
+    if (!reservation.ok) {
+      const runLimit = reservation.limit;
       return streamSSE(c, async (s) => {
         await s.writeSSE({
           event: "keel.error",
@@ -140,8 +188,18 @@ export function proxyRoutes(deps: Deps) {
       });
     }
 
+    const { run, id: reservationId } = reservation;
+
     const abort = new AbortController();
-    const { events, served: profile } = await startTurn(deps, prepared, abort.signal, accountId);
+    let startedTurn: Awaited<ReturnType<typeof startTurn>>;
+    try {
+      startedTurn = await startTurn(deps, prepared, abort.signal, accountId);
+    } catch (err) {
+      // Nothing was generated, so nothing is held or charged.
+      await releaseTurn(deps.sql, accountId, reservationId).catch(() => {});
+      throw err;
+    }
+    const { events, served: profile } = startedTurn;
     const upstreamStartedMs = Date.now() - started;
 
     return streamSSE(c, async (s) => {
@@ -183,7 +241,7 @@ export function proxyRoutes(deps: Deps) {
         {
           accountId,
           deviceId,
-          projectHash: projectHash(deps.projectHashSalt, accountId, body.projectId),
+          projectHash: hashedProject,
           threadId: body.threadId,
           runId: body.runId,
           turnIndex: body.turnIndex,
@@ -201,6 +259,7 @@ export function proxyRoutes(deps: Deps) {
           configVersion: config.version,
         },
         period,
+        reservationId,
       ).catch((err) => {
         // Losing a ledger row is bad but must not hide the reply already sent.
         log.error("ledger_write_failed", { account: accountId, run: body.runId, err: (err as Error).message });

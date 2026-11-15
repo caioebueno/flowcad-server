@@ -18,8 +18,13 @@ const toDate = (unix: number | null | undefined) => (unix ? new Date(unix * 1000
 /**
  * Writes a Stripe subscription into `subscriptions` and moves the account's
  * plan between free and pro to match. Hand-assigned plans are left alone.
+ *
+ * An account has one live subscription. When a second one goes live (two
+ * Checkout sessions completed, from a double click or two Macs), the newer
+ * one is cancelled in Stripe, so the customer isn't billed twice and gets one
+ * trial. `billing` is null only where Stripe isn't set up.
  */
-export async function syncSubscription(sql: Sql, sub: Stripe.Subscription): Promise<string | null> {
+export async function syncSubscription(sql: Sql, sub: Stripe.Subscription, billing: BillingGateway | null): Promise<string | null> {
   const customerId = typeof sub.customer === "string" ? sub.customer : sub.customer.id;
   const metaAccount = sub.metadata?.account_id;
   const [account] = await sql<{ id: string }[]>`
@@ -39,7 +44,16 @@ export async function syncSubscription(sql: Sql, sub: Stripe.Subscription): Prom
   const periodEnd = item?.current_period_end ?? legacy.current_period_end;
   const interval = item?.price?.recurring?.interval ?? null;
 
-  await sql.begin(async (tx) => {
+  const live = LIVE_STATUSES.includes(sub.status);
+  const duplicateOf = await sql.begin(async (tx) => {
+    // Lock the account first, so subscriptions of one account are written one at a time.
+    const [{ plan } = { plan: "free" }] = await tx<{ plan: string }[]>`select plan from accounts where id = ${account.id} for update`;
+    const [other] = live
+      ? await tx<{ stripe_subscription_id: string }[]>`
+          select stripe_subscription_id from subscriptions
+          where account_id = ${account.id} and status = any(${LIVE_STATUSES}) and stripe_subscription_id <> ${sub.id}
+          order by updated_at limit 1`
+      : [];
     await tx`
       insert into subscriptions (stripe_subscription_id, account_id, stripe_price_id, price_interval, status,
                                  current_period_start, current_period_end, trial_end, cancel_at_period_end, updated_at)
@@ -54,13 +68,20 @@ export async function syncSubscription(sql: Sql, sub: Stripe.Subscription): Prom
     if (sub.trial_end || sub.status === "trialing") {
       await tx`update accounts set trial_used_at = coalesce(trial_used_at, now()) where id = ${account.id}`;
     }
-    const [live] = await tx`
+    const [anyLive] = await tx`
       select 1 from subscriptions where account_id = ${account.id} and status = any(${LIVE_STATUSES}) limit 1`;
-    const [{ plan } = { plan: "free" }] = await tx<{ plan: string }[]>`select plan from accounts where id = ${account.id} for update`;
     if (!HAND_ASSIGNED_PLANS.has(plan)) {
-      await tx`update accounts set plan = ${live ? "pro" : "free"} where id = ${account.id}`;
+      await tx`update accounts set plan = ${anyLive ? "pro" : "free"} where id = ${account.id}`;
     }
+    return other?.stripe_subscription_id ?? null;
   });
+
+  if (duplicateOf && billing) {
+    // Never a trial here: it was already used by the subscription the account keeps.
+    log.warn("stripe_duplicate_subscription", { account: account.id, subscription: sub.id, keeps: duplicateOf, status: sub.status });
+    const cancelled = await billing.cancelSubscription(sub.id);
+    await syncSubscription(sql, cancelled, billing);
+  }
   return account.id;
 }
 
@@ -100,7 +121,7 @@ async function handleEvent(sql: Sql, billing: BillingGateway, config: ConfigDoc,
         await sql`update accounts set stripe_customer_id = coalesce(stripe_customer_id, ${customerId}) where id = ${accountId}`;
       }
       const subId = subscriptionIdOf(session);
-      if (subId) await syncSubscription(sql, await billing.retrieveSubscription(subId));
+      if (subId) await syncSubscription(sql, await billing.retrieveSubscription(subId), billing);
       return;
     }
     case "customer.subscription.created":
@@ -109,12 +130,12 @@ async function handleEvent(sql: Sql, billing: BillingGateway, config: ConfigDoc,
     case "customer.subscription.paused":
     case "customer.subscription.resumed":
       // Fetch the current state rather than trusting the event's copy, which can be out of order.
-      await syncSubscription(sql, await billing.retrieveSubscription((event.data.object as Stripe.Subscription).id));
+      await syncSubscription(sql, await billing.retrieveSubscription((event.data.object as Stripe.Subscription).id), billing);
       return;
     case "invoice.payment_failed":
     case "invoice.paid": {
       const subId = subscriptionIdOf(event.data.object);
-      if (subId) await syncSubscription(sql, await billing.retrieveSubscription(subId));
+      if (subId) await syncSubscription(sql, await billing.retrieveSubscription(subId), billing);
       return;
     }
     case "payment_intent.succeeded": {
@@ -286,8 +307,12 @@ export function billingRoutes(deps: Deps) {
     }
 
     const billing = deps.billing;
-    const url = await withCustomer(accountId, (customerId) =>
-      billing.createCheckout({
+    const url = await withCustomer(accountId, async (customerId) => {
+      // One open Checkout per account: an earlier one (a double click, another Mac, an abandoned tab)
+      // could otherwise also be completed and start a second subscription and trial.
+      const expired = await billing.expireOpenCheckouts(customerId);
+      if (expired > 0) log.info("stripe_checkouts_expired", { account: accountId, count: expired });
+      return billing.createCheckout({
         customerId,
         priceId,
         trialDays: entitlement.trialEligible && doc.billing.trialDays > 0 ? doc.billing.trialDays : null,
@@ -295,8 +320,8 @@ export function billingRoutes(deps: Deps) {
         context: body.context ?? null,
         successUrl: `${deps.publicBaseUrl}/v1/billing/return/success`,
         cancelUrl: `${deps.publicBaseUrl}/v1/billing/return/cancel`,
-      }),
-    );
+      });
+    });
     return c.json({ url });
   });
 
@@ -336,7 +361,7 @@ export function billingRoutes(deps: Deps) {
       where account_id = ${accountId} and status = 'trialing' order by updated_at desc limit 1`;
     if (!sub) throw new ApiError(409, "not_trialing", "There's no trial to end");
     const updated = await deps.billing.endTrial(sub.stripe_subscription_id);
-    await syncSubscription(deps.sql, updated);
+    await syncSubscription(deps.sql, updated, deps.billing);
     const { doc } = await deps.config.current();
     const entitlement = await entitlementFor(deps.sql, accountId, doc);
     const plan = await deps.plans.planFor(accountId, doc);

@@ -100,6 +100,36 @@ describe("email sign-in", () => {
     expect((await post("/v1/auth/email/start", { email: newEmail(), device: device() }, ip)).status).toBe(429);
   });
 
+  it("limits per IP by the address Railway's proxy appended, not one the client put first", async () => {
+    const { post } = setup();
+    const real = `198.51.100.${Math.floor(Math.random() * 250)}`;
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      // A client making up a new first entry each time.
+      const headers = { "x-forwarded-for": `10.9.${i}.1, ${real}` };
+      statuses.push((await post("/v1/auth/email/start", { email: newEmail(), device: device() }, headers)).status);
+    }
+    expect(statuses.filter((x) => x === 202)).toHaveLength(10);
+    expect(statuses.slice(10)).toEqual([429, 429]);
+  });
+
+  it("holds the limits when sends for one email race", async () => {
+    const { post } = setup();
+    const email = newEmail();
+    const results = await Promise.all(Array.from({ length: 15 }, () => post("/v1/auth/email/start", { email, device: device() })));
+    expect(results.filter((r) => r.status === 202)).toHaveLength(1);
+    const [n] = await db()<{ n: number; live: number }[]>`
+      select count(*)::bigint as n, count(*) filter (where used_at is null)::bigint as live from email_codes where email = ${email}`;
+    expect(n).toMatchObject({ n: 1, live: 1 });
+  });
+
+  it("holds the per-IP limit when sends from one IP race", async () => {
+    const { post } = setup();
+    const ip = { "x-forwarded-for": `192.0.2.${Math.floor(Math.random() * 250)}` };
+    const results = await Promise.all(Array.from({ length: 20 }, () => post("/v1/auth/email/start", { email: newEmail(), device: device() }, ip)));
+    expect(results.filter((r) => r.status === 202)).toHaveLength(10);
+  });
+
   it("returns 503 when the email can't be sent", async () => {
     const { post, mailer } = setup();
     mailer.fail = true;

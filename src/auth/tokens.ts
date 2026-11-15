@@ -4,6 +4,12 @@ import type { Sql } from "../db/index.js";
 
 export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 export const REFRESH_TOKEN_TTL_DAYS = 60;
+/**
+ * How long a just-rotated refresh token still works, so two refreshes sent at
+ * once, or a retry after the response was lost, don't sign the user out. It
+ * works only while the token that replaced it hasn't been used yet.
+ */
+export const REFRESH_GRACE_SECONDS = 60;
 const ISSUER = "keel-account-service";
 const AUDIENCE = "keel-app";
 
@@ -68,6 +74,9 @@ export type RotateResult =
 /**
  * Swaps a refresh token for a new one. Tokens are single use: presenting one
  * that was already rotated means it leaked, so the whole device is revoked.
+ * The exception is a token rotated in the last REFRESH_GRACE_SECONDS whose
+ * replacement hasn't been used: that is the app refreshing twice at once or
+ * retrying, so it gets a fresh token and the replacement stays valid.
  */
 export async function rotateRefreshToken(sql: Sql, token: string): Promise<RotateResult> {
   return sql.begin(async (tx) => {
@@ -80,23 +89,32 @@ export async function rotateRefreshToken(sql: Sql, token: string): Promise<Rotat
         revoked_at: Date | null;
         device_revoked_at: Date | null;
         account_status: string;
+        in_grace: boolean;
       }[]
     >`
       select rt.id, rt.device_id, rt.account_id, rt.expires_at <= now() as expired, rt.revoked_at,
-             d.revoked_at as device_revoked_at, a.status as account_status
+             d.revoked_at as device_revoked_at, a.status as account_status,
+             (rt.replaced_by is not null and rt.revoked_at > now() - make_interval(secs => ${REFRESH_GRACE_SECONDS})
+              and successor.revoked_at is null) as in_grace
       from refresh_tokens rt
       join devices d on d.id = rt.device_id
       join accounts a on a.id = rt.account_id
+      left join refresh_tokens successor on successor.id = rt.replaced_by
       where rt.token_hash = ${hashToken(token)}
       for update of rt`;
     if (!row) return { ok: false, reason: "unknown" } as const;
     if (row.device_revoked_at) return { ok: false, reason: "device_revoked" } as const;
-    if (row.revoked_at) {
+    if (row.revoked_at && !row.in_grace) {
       await revokeDevice(tx as unknown as Sql, row.device_id);
       return { ok: false, reason: "reused" } as const;
     }
     if (row.expired) return { ok: false, reason: "expired" } as const;
     if (row.account_status !== "active") return { ok: false, reason: "account_inactive" } as const;
+    if (row.revoked_at) {
+      // A repeat inside the grace window: a sibling token, leaving the first replacement (and replaced_by) as they are.
+      const next = await issueRefreshToken(tx as unknown as Sql, row.account_id, row.device_id);
+      return { ok: true, accountId: row.account_id, deviceId: row.device_id, next } as const;
+    }
 
     const next = await issueRefreshToken(tx as unknown as Sql, row.account_id, row.device_id);
     await tx`update refresh_tokens set revoked_at = now(), replaced_by = ${next.id} where id = ${row.id}`;

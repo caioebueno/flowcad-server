@@ -27,6 +27,7 @@ const EnvSchema = z.object({
   /**
    * Self-hosted model: vLLM's Anthropic-compatible endpoint (e.g. a Vast.ai
    * instance's vLLM API address, without /v1). Unset, every turn goes to Claude.
+   * Must be https:// in production.
    */
   SELF_HOSTED_BASE_URL: z.preprocess((v) => (v === "" ? undefined : v), z.url().optional()),
   /** Sent as "Authorization: Bearer": vLLM's --api-key, or the Vast.ai portal token. */
@@ -42,6 +43,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   if (!parsed.success) {
     const missing = parsed.error.issues.map((i) => i.path.join(".")).join(", ");
     throw new Error(`Invalid environment: ${missing}`);
+  }
+  if (parsed.data.NODE_ENV === "production" && parsed.data.SELF_HOSTED_BASE_URL && !parsed.data.SELF_HOSTED_BASE_URL.startsWith("https://")) {
+    // Prompts, replies and the bearer token would cross the internet in the clear.
+    throw new Error("Invalid environment: SELF_HOSTED_BASE_URL must be https:// in production (use a TLS tunnel or the host's HTTPS endpoint)");
   }
   if (parsed.data.NODE_ENV === "production" && parsed.data.APP_ATTEST_MODE === "off") {
     console.warn(JSON.stringify({ level: "warn", msg: "APP_ATTEST_MODE is off in production" }));
