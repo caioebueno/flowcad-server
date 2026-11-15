@@ -93,6 +93,23 @@ describe("refresh and logout", () => {
     }
   });
 
+  it("bounds the extra tokens in the grace window: one repeat too many counts as reuse", async () => {
+    const s = await signIn(app);
+    const first = (await (await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).json()) as { refreshToken: string };
+    for (let i = 0; i < 8; i++) expect((await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).status).toBe(200);
+    expect((await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).status).toBe(401);
+    // A chain started from a stolen token is caught: the whole device is signed out.
+    expect((await post("/v1/auth/refresh", { refreshToken: first.refreshToken })).status).toBe(401);
+  });
+
+  it("lets five refreshes that race all succeed", async () => {
+    const s = await signIn(app);
+    const results = await Promise.all(Array.from({ length: 5 }, () => post("/v1/auth/refresh", { refreshToken: s.refreshToken })));
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+    const tokens = (await Promise.all(results.map((r) => r.json()))) as { refreshToken: string }[];
+    for (const t of tokens) expect((await post("/v1/auth/refresh", { refreshToken: t.refreshToken })).status).toBe(200);
+  });
+
   it("keeps the user signed in when a refresh is retried after a lost response", async () => {
     const s = await signIn(app);
     expect((await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).status).toBe(200); // response "lost"

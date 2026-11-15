@@ -120,6 +120,13 @@ export function priceUsage(config: ConfigDoc, requestedModel: string, usage: Usa
 export const CHARS_PER_OUTPUT_TOKEN_ESTIMATE = 3;
 
 /**
+ * Thinking streams as a summary ("display: updates"), far shorter than the
+ * thinking tokens billed, so when thinking was seen the estimate is at least
+ * this many tokens per second of streaming (a slow rate for Claude's output).
+ */
+export const THINKING_TOKENS_PER_SECOND_FLOOR = 40;
+
+/**
  * Collects the usage block from a stream. `message_start` carries the input
  * side; each `message_delta` carries cumulative totals, so the latest non-null
  * value of each field wins.
@@ -127,13 +134,22 @@ export const CHARS_PER_OUTPUT_TOKEN_ESTIMATE = 3;
  * Output tokens are only reported in `message_delta`, at the end. When the
  * stream stops before that (the app disconnected, or the stream broke),
  * Anthropic has still billed what it generated, so the output is estimated
- * from the text, thinking and tool input streamed so far.
+ * from the text, thinking and tool input streamed so far, and, when the model
+ * was thinking, from how long it streamed. The estimate never goes above the
+ * turn's output cap.
  */
 export class StreamUsage {
   private usage: UsageLike = {};
   private finalOutput = false;
   private streamedChars = 0;
+  private sawThinking = false;
+  private firstAt: number | null = null;
   stopReason: string | null = null;
+
+  constructor(
+    private readonly maxOutputTokens = Infinity,
+    private readonly clock: () => number = Date.now,
+  ) {}
 
   observe(event: {
     type: string;
@@ -141,7 +157,11 @@ export class StreamUsage {
     usage?: UsageLike;
     delta?: { stop_reason?: string | null; type?: string; text?: string; thinking?: string; partial_json?: string; signature?: string };
   }) {
+    if (this.firstAt === null) this.firstAt = this.clock();
     if (event.type === "message_start" && event.message?.usage) this.merge(event.message.usage);
+    if (event.type === "content_block_start" && (event as { content_block?: { type?: string } }).content_block?.type?.includes("thinking")) {
+      this.sawThinking = true;
+    }
     if (event.type === "content_block_delta" && event.delta) {
       const d = event.delta;
       this.streamedChars += (d.text?.length ?? 0) + (d.thinking?.length ?? 0) + (d.partial_json?.length ?? 0);
@@ -168,7 +188,11 @@ export class StreamUsage {
 
   get raw(): UsageLike {
     if (this.finalOutput) return this.usage;
-    const estimate = Math.ceil(this.streamedChars / CHARS_PER_OUTPUT_TOKEN_ESTIMATE);
+    let estimate = Math.ceil(this.streamedChars / CHARS_PER_OUTPUT_TOKEN_ESTIMATE);
+    if (this.sawThinking && this.firstAt !== null) {
+      estimate = Math.max(estimate, Math.ceil(((this.clock() - this.firstAt) / 1000) * THINKING_TOKENS_PER_SECOND_FLOOR));
+    }
+    estimate = Math.min(estimate, this.maxOutputTokens);
     return { ...this.usage, output_tokens: Math.max(this.usage.output_tokens ?? 0, estimate) };
   }
 }

@@ -10,6 +10,12 @@ export const REFRESH_TOKEN_TTL_DAYS = 60;
  * works only while the token that replaced it hasn't been used yet.
  */
 export const REFRESH_GRACE_SECONDS = 60;
+/**
+ * At most this many extra tokens per rotated token inside the grace window:
+ * enough for every request that hit token_expired at once to refresh, but a
+ * bound on the chains a stolen token can start without reuse detection.
+ */
+export const REFRESH_GRACE_MAX_SIBLINGS = 8;
 const ISSUER = "keel-account-service";
 const AUDIENCE = "keel-app";
 
@@ -76,7 +82,9 @@ export type RotateResult =
  * that was already rotated means it leaked, so the whole device is revoked.
  * The exception is a token rotated in the last REFRESH_GRACE_SECONDS whose
  * replacement hasn't been used: that is the app refreshing twice at once or
- * retrying, so it gets a fresh token and the replacement stays valid.
+ * retrying, so it gets a fresh token and the replacement stays valid. Up to
+ * REFRESH_GRACE_MAX_SIBLINGS of them; one more counts as reuse and revokes the
+ * device, as does any use once the replacement has been used.
  */
 export async function rotateRefreshToken(sql: Sql, token: string): Promise<RotateResult> {
   return sql.begin(async (tx) => {
@@ -90,12 +98,13 @@ export async function rotateRefreshToken(sql: Sql, token: string): Promise<Rotat
         device_revoked_at: Date | null;
         account_status: string;
         in_grace: boolean;
+        replaced_by: string | null;
       }[]
     >`
       select rt.id, rt.device_id, rt.account_id, rt.expires_at <= now() as expired, rt.revoked_at,
              d.revoked_at as device_revoked_at, a.status as account_status,
              (rt.replaced_by is not null and rt.revoked_at > now() - make_interval(secs => ${REFRESH_GRACE_SECONDS})
-              and successor.revoked_at is null) as in_grace
+              and successor.revoked_at is null) as in_grace, rt.replaced_by
       from refresh_tokens rt
       join devices d on d.id = rt.device_id
       join accounts a on a.id = rt.account_id
@@ -104,7 +113,17 @@ export async function rotateRefreshToken(sql: Sql, token: string): Promise<Rotat
       for update of rt`;
     if (!row) return { ok: false, reason: "unknown" } as const;
     if (row.device_revoked_at) return { ok: false, reason: "device_revoked" } as const;
-    if (row.revoked_at && !row.in_grace) {
+    // Counted in its own statement, after the lock, so it sees siblings that refreshes we waited on just made.
+    const siblings =
+      row.revoked_at && row.in_grace
+        ? (
+            await tx<{ n: number }[]>`
+              select count(*)::bigint as n from refresh_tokens
+              where device_id = ${row.device_id} and created_at > ${row.revoked_at} and id <> ${row.replaced_by}`
+          )[0]!.n
+        : 0;
+    if (row.revoked_at && (!row.in_grace || siblings >= REFRESH_GRACE_MAX_SIBLINGS)) {
+      // Reuse after the replacement was used, past the window, or one repeat too many.
       await revokeDevice(tx as unknown as Sql, row.device_id);
       return { ok: false, reason: "reused" } as const;
     }

@@ -28,6 +28,7 @@ billing with AI credits and credit packs), plus remote config from phase 2.
 | AI credits | Done. 2,000 a billing period on Pro, 1,000 for the trial, packs used after; `credits_low` warning at 20% left, `402 credits_exhausted` at zero. Contract: `/mnt/project-files/keel-account-service/api-pro-and-credits.md` |
 | App Attest | Interface and middleware in place, off by default (phase 2) |
 | Limits on agent turns | Done. Each turn holds back its worst-case cost while it streams, so turns sent at once can't spend credits that aren't there (only one turn can run past the end of the credits); `concurrentRuns` turns in flight and `turnsPerMinute` per account, else `429 rate_limited`. Turns that failed before a reply don't use up a run |
+| Client IP for rate limits | The right-most `X-Forwarded-For` entry, the one Railway's proxy appends (a client can only add entries to its left). If a CDN or another proxy is ever put in front of Railway, that entry becomes the CDN's address and every user shares one bucket: switch to the CDN's client-IP header (`src/util/clientIp.ts`) |
 | Rate limits on Apple sign-ins | Value served in config, not enforced yet (phase 2) |
 | Overnight reviews (`/batches`) and push | Not started (phase 3). The `overnight_review` profile already exists |
 

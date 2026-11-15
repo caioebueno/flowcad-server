@@ -9,7 +9,7 @@ import { buildParams, mapUpstreamError, type StreamEvent, type UpstreamParams } 
 import { dropSelfHostedThinking, selfHostedProfile } from "./selfHosted.js";
 import type { TaskProfile } from "../config/schema.js";
 import { priceUsage, StreamUsage, worstCaseMicros } from "./usage.js";
-import { projectHash, recordUsage, releaseTurn, reserveTurn } from "../ledger/ledger.js";
+import { heartbeatTurn, projectHash, recordUsage, releaseTurn, RESERVATION_HEARTBEAT_SECONDS, reserveTurn, type Reservation } from "../ledger/ledger.js";
 import { creditBalance, creditPeriod, creditsLeft, isExhausted, isLow, microsPerCredit, type CreditPeriod } from "../billing/credits.js";
 import { packsAvailable } from "../billing/entitlement.js";
 import { log } from "../logger.js";
@@ -79,6 +79,19 @@ const creditsExhausted = (deps: Deps, period: CreditPeriod) =>
     canBuyPack: !period.isTrial && packsAvailable(deps),
     ...(period.paymentFailed ? { paymentFailed: true } : {}),
   });
+
+/** The answer to a turn or keepwarm `reserveTurn` refused, other than a run cap. */
+function refused(deps: Deps, period: CreditPeriod, r: Exclude<Reservation, { ok: true } | { reason: "run_limit_reached" }>, log_: { account: string; run: string }) {
+  if (r.reason === "credits_exhausted") return creditsExhausted(deps, period);
+  log.warn("turn_rate_limited", { ...log_, reason: r.reason });
+  const message =
+    r.reason === "credits_held"
+      ? "Your other agent turns are using the rest of your credits. Try again when they finish."
+      : r.reason === "too_many_in_flight"
+        ? "Too many agent turns at once. Try again in a moment."
+        : "Too many agent turns. Try again in a moment.";
+  return new ApiError(429, "rate_limited", message, { reason: r.reason, retryAfter: r.reason === "too_many_per_minute" ? 60 : 5 });
+}
 
 /** About 3 bytes of request JSON a token, which overestimates for text and far overestimates for images. */
 const BYTES_PER_TOKEN_ESTIMATE = 3;
@@ -163,15 +176,8 @@ export function proxyRoutes(deps: Deps) {
       period,
       limits,
     );
-    if (!reservation.ok && reservation.reason === "credits_exhausted") throw creditsExhausted(deps, period);
     if (!reservation.ok && reservation.reason !== "run_limit_reached") {
-      log.warn("turn_rate_limited", { account: accountId, run: body.runId, reason: reservation.reason });
-      throw new ApiError(
-        429,
-        "rate_limited",
-        reservation.reason === "too_many_in_flight" ? "Too many agent turns at once. Try again in a moment." : "Too many agent turns. Try again in a moment.",
-        { reason: reservation.reason, retryAfter: reservation.reason === "too_many_in_flight" ? 5 : 60 },
-      );
+      throw refused(deps, period, reservation, { account: accountId, run: body.runId });
     }
     if (!reservation.ok) {
       const runLimit = reservation.limit;
@@ -204,122 +210,135 @@ export function proxyRoutes(deps: Deps) {
 
     return streamSSE(c, async (s) => {
       s.onAbort(() => abort.abort());
-      const usage = new StreamUsage();
-      let stopReason: string | null = null;
-      let failed = false;
-      let firstTokenMs: number | null = null;
-
+      // Keeps the hold alive however long the turn streams (see RESERVATION_TTL_MINUTES).
+      const heartbeat = setInterval(() => {
+        heartbeatTurn(deps.sql, reservationId).catch((err) =>
+          log.warn("turn_heartbeat_failed", { account: accountId, run: body.runId, err: (err as Error).message }),
+        );
+      }, RESERVATION_HEARTBEAT_SECONDS * 1000);
+      heartbeat.unref();
       try {
-        for await (const event of events as AsyncIterable<StreamEvent>) {
-          if (firstTokenMs === null && event.type === "content_block_delta") firstTokenMs = Date.now() - started;
-          usage.observe(event as never);
-          await s.writeSSE({ event: event.type, data: JSON.stringify(event) });
-          if (s.aborted) break;
+        const maxOut = body.maxOutputTokens ? Math.min(body.maxOutputTokens, profile.maxOutputTokens) : profile.maxOutputTokens;
+        const usage = new StreamUsage(maxOut);
+        let stopReason: string | null = null;
+        let failed = false;
+        let firstTokenMs: number | null = null;
+
+        try {
+          for await (const event of events as AsyncIterable<StreamEvent>) {
+            if (firstTokenMs === null && event.type === "content_block_delta") firstTokenMs = Date.now() - started;
+            usage.observe(event as never);
+            await s.writeSSE({ event: event.type, data: JSON.stringify(event) });
+            if (s.aborted) break;
+          }
+          stopReason = usage.stopReason;
+        } catch (err) {
+          if (s.aborted || abort.signal.aborted) {
+            stopReason = "client_disconnected";
+          } else {
+            failed = true;
+            stopReason = "upstream_error";
+            const mapped = mapUpstreamError(err);
+            log.warn("stream_failed", { account: accountId, run: body.runId, code: mapped.code });
+            await s.writeSSE({
+              event: "keel.error",
+              data: JSON.stringify({ type: "keel.error", code: mapped.code, status: mapped.status, message: mapped.message }),
+            });
+          }
         }
-        stopReason = usage.stopReason;
-      } catch (err) {
-        if (s.aborted || abort.signal.aborted) {
-          stopReason = "client_disconnected";
-        } else {
-          failed = true;
-          stopReason = "upstream_error";
-          const mapped = mapUpstreamError(err);
-          log.warn("stream_failed", { account: accountId, run: body.runId, code: mapped.code });
+        if (s.aborted && !stopReason) stopReason = "client_disconnected";
+
+        // Whatever happened, Anthropic billed what it produced, so it is recorded.
+        const priced = priceUsage(config.doc, profile.model, usage.raw);
+        const latencyMs = Date.now() - started;
+        const after = await recordUsage(
+          deps.sql,
+          {
+            accountId,
+            deviceId,
+            projectHash: hashedProject,
+            threadId: body.threadId,
+            runId: body.runId,
+            turnIndex: body.turnIndex,
+            taskType: body.taskType,
+            kind: "turn",
+            model: profile.model,
+            servedModel: priced.servedModel,
+            inputTokens: priced.inputTokens,
+            cacheWriteTokens: priced.cacheWrite5mTokens + priced.cacheWrite1hTokens,
+            cacheReadTokens: priced.cacheReadTokens,
+            outputTokens: priced.outputTokens,
+            costMicros: priced.costMicros,
+            stopReason,
+            latencyMs,
+            configVersion: config.version,
+          },
+          period,
+          reservationId,
+        ).catch((err) => {
+          // Losing a ledger row is bad but must not hide the reply already sent.
+          log.error("ledger_write_failed", { account: accountId, run: body.runId, err: (err as Error).message });
+          return { monthlyUsedMicros: usedMicros + priced.costMicros, extraMicros };
+        });
+        log.info("turn", {
+          account: accountId,
+          run: body.runId,
+          turn: body.turnIndex,
+          task: body.taskType,
+          in: priced.inputTokens,
+          out: priced.outputTokens,
+          cost: priced.costMicros,
+          stop: stopReason,
+          ms: latencyMs,
+          // Where the time went: which model served it, how long until it
+          // started (a self-hosted wait shows here) and how fast it wrote.
+          model: profile.model,
+          startMs: upstreamStartedMs,
+          firstTokenMs,
+          tokensPerSec: firstTokenMs !== null && latencyMs > firstTokenMs ? Math.round((priced.outputTokens * 1000) / (latencyMs - firstTokenMs)) : null,
+        });
+
+        if (s.aborted) return;
+        const allowanceUsedPercent = percent(after.monthlyUsedMicros, period.limitMicros);
+        const left = creditsLeft(config.doc, period, after);
+        const resetsAt = period.end.toISOString();
+        await s.writeSSE({
+          event: "keel.usage",
+          data: JSON.stringify({
+            type: "keel.usage",
+            inputTokens: priced.inputTokens,
+            cacheWriteTokens: priced.cacheWrite5mTokens + priced.cacheWrite1hTokens,
+            cacheReadTokens: priced.cacheReadTokens,
+            outputTokens: priced.outputTokens,
+            costMicros: priced.costMicros,
+            servedModel: priced.servedModel,
+            model: profile.model,
+            creditsCharged: creditsCharged(priced.costMicros, microsPerCredit(config.doc)),
+            creditsLeft: left,
+            resetsAt,
+            // Older builds read these percents of the monthly credits.
+            allowanceUsedPercent,
+            allowanceLeftPercent: Math.max(0, Math.round((100 - allowanceUsedPercent) * 10) / 10),
+            runTurnsLeft: Math.max(0, limits.maxTurnsPerRun - run.turns - 1),
+            runBudgetUsedPercent: percent(run.costMicros + priced.costMicros, limits.maxCostPerRunMicros),
+          }),
+        });
+        if (!failed && isLow(config.doc, period, after.monthlyUsedMicros)) {
           await s.writeSSE({
-            event: "keel.error",
-            data: JSON.stringify({ type: "keel.error", code: mapped.code, status: mapped.status, message: mapped.message }),
+            event: "keel.warning",
+            data: JSON.stringify({ type: "keel.warning", code: "credits_low", creditsLeft: left, resetsAt, allowanceUsedPercent }),
           });
         }
-      }
-      if (s.aborted && !stopReason) stopReason = "client_disconnected";
-
-      // Whatever happened, Anthropic billed what it produced, so it is recorded.
-      const priced = priceUsage(config.doc, profile.model, usage.raw);
-      const latencyMs = Date.now() - started;
-      const after = await recordUsage(
-        deps.sql,
-        {
-          accountId,
-          deviceId,
-          projectHash: hashedProject,
-          threadId: body.threadId,
-          runId: body.runId,
-          turnIndex: body.turnIndex,
-          taskType: body.taskType,
-          kind: "turn",
-          model: profile.model,
-          servedModel: priced.servedModel,
-          inputTokens: priced.inputTokens,
-          cacheWriteTokens: priced.cacheWrite5mTokens + priced.cacheWrite1hTokens,
-          cacheReadTokens: priced.cacheReadTokens,
-          outputTokens: priced.outputTokens,
-          costMicros: priced.costMicros,
-          stopReason,
-          latencyMs,
-          configVersion: config.version,
-        },
-        period,
-        reservationId,
-      ).catch((err) => {
-        // Losing a ledger row is bad but must not hide the reply already sent.
-        log.error("ledger_write_failed", { account: accountId, run: body.runId, err: (err as Error).message });
-        return { monthlyUsedMicros: usedMicros + priced.costMicros, extraMicros };
-      });
-      log.info("turn", {
-        account: accountId,
-        run: body.runId,
-        turn: body.turnIndex,
-        task: body.taskType,
-        in: priced.inputTokens,
-        out: priced.outputTokens,
-        cost: priced.costMicros,
-        stop: stopReason,
-        ms: latencyMs,
-        // Where the time went: which model served it, how long until it
-        // started (a self-hosted wait shows here) and how fast it wrote.
-        model: profile.model,
-        startMs: upstreamStartedMs,
-        firstTokenMs,
-        tokensPerSec: firstTokenMs !== null && latencyMs > firstTokenMs ? Math.round((priced.outputTokens * 1000) / (latencyMs - firstTokenMs)) : null,
-      });
-
-      if (s.aborted) return;
-      const allowanceUsedPercent = percent(after.monthlyUsedMicros, period.limitMicros);
-      const left = creditsLeft(config.doc, period, after);
-      const resetsAt = period.end.toISOString();
-      await s.writeSSE({
-        event: "keel.usage",
-        data: JSON.stringify({
-          type: "keel.usage",
-          inputTokens: priced.inputTokens,
-          cacheWriteTokens: priced.cacheWrite5mTokens + priced.cacheWrite1hTokens,
-          cacheReadTokens: priced.cacheReadTokens,
-          outputTokens: priced.outputTokens,
-          costMicros: priced.costMicros,
-          servedModel: priced.servedModel,
-          model: profile.model,
-          creditsCharged: creditsCharged(priced.costMicros, microsPerCredit(config.doc)),
-          creditsLeft: left,
-          resetsAt,
-          // Older builds read these percents of the monthly credits.
-          allowanceUsedPercent,
-          allowanceLeftPercent: Math.max(0, Math.round((100 - allowanceUsedPercent) * 10) / 10),
-          runTurnsLeft: Math.max(0, limits.maxTurnsPerRun - run.turns - 1),
-          runBudgetUsedPercent: percent(run.costMicros + priced.costMicros, limits.maxCostPerRunMicros),
-        }),
-      });
-      if (!failed && isLow(config.doc, period, after.monthlyUsedMicros)) {
-        await s.writeSSE({
-          event: "keel.warning",
-          data: JSON.stringify({ type: "keel.warning", code: "credits_low", creditsLeft: left, resetsAt, allowanceUsedPercent }),
-        });
+      } finally {
+        clearInterval(heartbeat);
       }
     });
   });
 
   app.post("/keepwarm", limit, requireAttestation(deps), async (c) => {
     const started = Date.now();
-    const { body, config, period, profile, selfProfile, usedMicros, extraMicros } = await prepare(c, deps);
+    const prepared = await prepare(c, deps);
+    const { body, config, period, profile, selfProfile, usedMicros, extraMicros } = prepared;
     const { accountId, deviceId } = c.get("auth");
     if (selfProfile) {
       // The next turn goes to the self-hosted model, whose cache warms itself:
@@ -335,15 +354,45 @@ export function proxyRoutes(deps: Deps) {
         allowanceUsedPercent: percent(usedMicros, period.limitMicros),
       });
     }
+    const hashedProject = projectHash(deps.projectHashSalt, accountId, body.projectId);
+    // A prewarm writes the whole request to the cache, so it is admitted and held like a turn (input only).
+    const reservation = await reserveTurn(
+      deps.sql,
+      {
+        accountId,
+        deviceId,
+        projectHash: hashedProject,
+        threadId: body.threadId,
+        runId: body.runId,
+        turnIndex: body.turnIndex,
+        taskType: body.taskType,
+        model: profile.model,
+        configVersion: config.version,
+      },
+      worstCaseMicros(config.doc, profile.model, Math.ceil(prepared.bodyBytes / BYTES_PER_TOKEN_ESTIMATE), 0),
+      period,
+      config.doc.limits,
+      "keepwarm",
+    );
+    if (!reservation.ok) {
+      if (reservation.reason === "run_limit_reached") throw new Error("unreachable: keepwarm has no run cap");
+      throw refused(deps, period, reservation, { account: accountId, run: body.runId });
+    }
     const params = buildParams(profile, body.request, { effort: body.effort, maxOutputTokens: body.maxOutputTokens });
-    const usage = await deps.upstream.prewarm(params);
+    let usage;
+    try {
+      usage = await deps.upstream.prewarm(params);
+    } catch (err) {
+      await releaseTurn(deps.sql, accountId, reservation.id).catch(() => {});
+      throw err;
+    }
     const priced = priceUsage(config.doc, profile.model, usage as never);
     const after = await recordUsage(
       deps.sql,
       {
         accountId,
         deviceId,
-        projectHash: projectHash(deps.projectHashSalt, accountId, body.projectId),
+        projectHash: hashedProject,
         threadId: body.threadId,
         runId: body.runId,
         turnIndex: body.turnIndex,
@@ -361,6 +410,7 @@ export function proxyRoutes(deps: Deps) {
         configVersion: config.version,
       },
       period,
+      reservation.id,
     );
     return c.json({
       inputTokens: priced.inputTokens,
