@@ -8,12 +8,13 @@ import { billingPublicRoutes, billingRoutes } from "./billing/routes.js";
 import { requireAppVersion, requireAuth } from "./auth/middleware.js";
 import { proxyRoutes } from "./proxy/routes.js";
 import { accountRoutes } from "./ledger/routes.js";
+import { projectRoutes } from "./projects/routes.js";
 import { log } from "./logger.js";
 import { appliedMigrations } from "./db/index.js";
 import Stripe from "stripe";
 
 /** Bump when adding a file to migrations/. The health check fails until all are applied. */
-export const EXPECTED_MIGRATIONS = 3;
+export const EXPECTED_MIGRATIONS = 4;
 
 export function createApp(deps: Deps) {
   const app = new Hono<AppEnv>();
@@ -93,6 +94,7 @@ export function createApp(deps: Deps) {
   authed.route("/billing", billingRoutes(deps));
   authed.route("/account", linkEmailRoutes(deps));
   authed.route("/", accountRoutes(deps));
+  authed.route("/", projectRoutes(deps));
   v1.route("/", authed);
 
   app.route("/v1", v1);

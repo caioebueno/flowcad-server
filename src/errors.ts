@@ -27,6 +27,9 @@ export type ErrorCode =
   | "rate_limited"
   | "upstream_error"
   | "upstream_unavailable"
+  | "storage_full"
+  | "storage_error"
+  | "hash_mismatch"
   | "internal";
 
 export class ApiError extends Error {

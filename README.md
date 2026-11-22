@@ -3,8 +3,10 @@
 The small web service between the Keel Mac app and Claude's API. It holds Keel's
 Anthropic key, signs people up and in (Apple or an emailed code), sells Keel Pro
 through Stripe, sets the model and limits for each task type, streams agent turns
-through to Claude, and records what every turn cost.
-It stores no prompts, replies, CAD files or project content.
+through to Claude, records what every turn cost, and keeps each person's projects
+(chats, the model, context, outputs, files and exports) so they sync between their Macs.
+Agent turns pass through without being stored; project content is stored only through
+the sync routes, for the account that owns it.
 
 TypeScript on Node 22, [Hono](https://hono.dev), Postgres, hosted on Railway.
 
@@ -30,6 +32,7 @@ billing with AI credits and credit packs), plus remote config from phase 2.
 | Limits on agent turns | Done. Each turn holds back its worst-case cost while it streams, so turns sent at once can't spend credits that aren't there (only one turn can run past the end of the credits); `concurrentRuns` turns in flight and `turnsPerMinute` per account, else `429 rate_limited`. Turns that failed before a reply don't use up a run |
 | Client IP for rate limits | The right-most `X-Forwarded-For` entry, the one Railway's proxy appends (a client can only add entries to its left). If a CDN or another proxy is ever put in front of Railway, that entry becomes the CDN's address and every user shares one bucket: switch to the CDN's client-IP header (`src/util/clientIp.ts`) |
 | Rate limits on Apple sign-ins | Value served in config, not enforced yet (phase 2) |
+| Project sync: `GET /projects`, `POST /sync/push`, `GET /sync/changes`, `PUT`/`GET`/`HEAD /blobs/:sha256`, `GET /storage` | Done. Projects and their records (threads, messages, model, context, files, outputs, exports, versions) per account, with revisions for conflicts and one change sequence per account for pulls. Files are content-addressed blobs in an S3-compatible bucket (Postgres without one), 5 GB per account, 512 MB per file. Contract: [docs/project-sync.md](docs/project-sync.md) |
 | Overnight reviews (`/batches`) and push | Not started (phase 3). The `overnight_review` profile already exists |
 
 ## Plans
@@ -82,6 +85,10 @@ in-flight streams 300 seconds to finish when a deploy replaces an instance.
    - `PUBLIC_BASE_URL` = the service's public https address, for example `https://flowcad-server-production.up.railway.app`
    - `RESEND_API_KEY` and `EMAIL_FROM` (for example `Keel <signin@yourdomain.com>`, on a domain verified in Resend)
    - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTH`, `STRIPE_PRICE_YEAR`, `STRIPE_PRICE_PACK`, and optionally `STRIPE_AUTOMATIC_TAX=true`
+   - For project files, add a **Bucket** to the Railway project (or use Cloudflare R2) and set
+     `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from its
+     credentials. Without them, files are stored in Postgres. `STORAGE_QUOTA_BYTES` and
+     `BLOB_MAX_BYTES` change the 5 GB per account and 512 MB per file limits
 3. Generate a public domain under the service's Networking settings, or attach `api.keel.app`.
 4. In Stripe: create a **Keel Pro** product with a $39 monthly and a $390 yearly recurring price,
    and a **Keel AI credits** product with a one-time $10 price for 1,000 credits (the three ids

@@ -8,6 +8,7 @@ import type { PlanProvider } from "./billing/plans.js";
 import type { EmailCodes } from "./auth/emailCodes.js";
 import type { Mailer } from "./auth/mailer.js";
 import type { BillingGateway } from "./billing/stripe.js";
+import type { BlobStore } from "./storage/blobStore.js";
 
 /** Everything the routes need, injected so tests can swap Apple, Anthropic and billing. */
 export interface Deps {
@@ -27,6 +28,16 @@ export interface Deps {
   /** Public https origin of this service, for Stripe's return pages. */
   publicBaseUrl: string;
   projectHashSalt: string;
+  /** Bytes of synced project files (models, photos, datasheets, exports). */
+  blobs: BlobStore;
+  storage: StorageLimits;
+}
+
+export interface StorageLimits {
+  /** Total blob bytes one account may keep. */
+  quotaBytes: number;
+  /** Largest single blob. */
+  maxBlobBytes: number;
 }
 
 export interface AuthContext {
