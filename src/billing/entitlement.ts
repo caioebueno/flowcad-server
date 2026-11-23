@@ -54,7 +54,8 @@ export async function entitlementFor(sql: Sql, accountId: string, config: Config
     source,
     interval,
     expiresAt: expiresAt?.toISOString() ?? null,
-    trialEligible: !a?.trial_used_at,
+    // No new trials: the Free tier's starter credits replaced the Pro trial. Kept for older apps.
+    trialEligible: false,
     cancelAtPeriodEnd: sub?.cancel_at_period_end ?? false,
     paymentFailed: sub?.status === "past_due",
   };

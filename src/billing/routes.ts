@@ -274,7 +274,7 @@ export function billingRoutes(deps: Deps) {
           prices: prices.map((p) => ({ interval: p.interval, amount: p.unitAmount, currency: p.currency })),
         },
       ],
-      trialDays: doc.billing.trialDays,
+      trialDays: 0,
       trialCredits: doc.billing.trialCredits,
       monthlyCredits: doc.plans.pro?.monthlyCredits ?? 0,
       pack:
@@ -315,7 +315,8 @@ export function billingRoutes(deps: Deps) {
       return billing.createCheckout({
         customerId,
         priceId,
-        trialDays: entitlement.trialEligible && doc.billing.trialDays > 0 ? doc.billing.trialDays : null,
+        // Pro starts paid: there is no trial now that Free has starter credits.
+        trialDays: null,
         accountId,
         context: body.context ?? null,
         successUrl: `${deps.publicBaseUrl}/v1/billing/return/success`,

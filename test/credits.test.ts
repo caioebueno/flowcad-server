@@ -271,12 +271,12 @@ describe("POST /billing/trial/end", () => {
 });
 
 describe("credit packs", () => {
-  it("lists the pack and the trial on /billing/plans", async () => {
+  it("lists the pack and no trial on /billing/plans", async () => {
     const { app } = makeApp();
     const s = await signIn(app, undefined, undefined, null);
     const body = (await (await app.request("/v1/billing/plans", { headers: authed(s.accessToken) })).json()) as Record<string, unknown>;
     expect(body).toMatchObject({
-      trialDays: 15,
+      trialDays: 0,
       trialCredits: 1000,
       monthlyCredits: 2000,
       pack: { credits: 1000, amount: 1000, currency: "usd" },
