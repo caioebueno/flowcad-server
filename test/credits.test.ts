@@ -1,3 +1,4 @@
+import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { describe, expect, it } from "vitest";
 import type Stripe from "stripe";
 import { authed, db, FakeBilling, makeApp, readSse, signedWebhook, signIn, textReply, turnBody } from "./helpers.js";
@@ -98,10 +99,13 @@ const packPaid = (accountId: string, pi: string) =>
   });
 
 describe("credits on GET /account", () => {
-  it("is null on Free", async () => {
+  it("is the one-time starter credits on Free, and null with them turned off", async () => {
     const { app } = makeApp();
     const s = await signIn(app, undefined, undefined, null);
-    expect((await account(app, s.accessToken)).credits).toBeNull();
+    expect((await account(app, s.accessToken)).credits).toMatchObject({ monthlyLimit: 300, left: 300, isTrial: false, canBuyPack: false });
+    const off = makeApp({ config: { ...DEFAULT_CONFIG, billing: { ...DEFAULT_CONFIG.billing, starterCredits: 0 } } });
+    const t = await signIn(off.app, undefined, undefined, null);
+    expect((await account(off.app, t.accessToken)).credits).toBeNull();
   });
 
   it("gives a trial 1,000 credits that reset when the trial ends", async () => {
