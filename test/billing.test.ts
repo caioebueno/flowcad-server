@@ -41,7 +41,7 @@ describe("Free accounts", () => {
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("plan_required");
     const a = await account(app, s.accessToken);
-    expect(a.entitlement).toMatchObject({ tier: "free", source: null, trialEligible: true });
+    expect(a.entitlement).toMatchObject({ tier: "free", source: null, trialEligible: false });
   });
 
   it("can use the agent with their one-time starter credits, which never reset", async () => {
@@ -79,17 +79,17 @@ describe("Free accounts", () => {
 });
 
 describe("GET /billing/plans", () => {
-  it("lists Pro prices and trial eligibility", async () => {
+  it("lists Pro prices and offers no trial", async () => {
     const { app } = makeApp();
     const s = await signIn(app, undefined, undefined, null);
     const body = (await (await app.request("/v1/billing/plans", { headers: authed(s.accessToken) })).json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ trialDays: 15, trialCredits: 1000, trialEligible: true, billingAvailable: true });
+    expect(body).toMatchObject({ trialDays: 0, trialEligible: false, billingAvailable: true });
     expect(JSON.stringify(body.plans)).toContain('"amount":2000');
   });
 });
 
 describe("checkout", () => {
-  it("creates a customer once and a checkout with the trial", async () => {
+  it("creates a customer once and a checkout without a trial", async () => {
     const billing = new FakeBilling();
     const { app } = makeApp({ billing });
     const s = await signIn(app, undefined, undefined, null);
@@ -100,7 +100,7 @@ describe("checkout", () => {
     expect(await res.json()).toEqual({ url: "https://checkout.stripe.com/c/pay/test" });
     expect(billing.checkouts[0]).toMatchObject({
       priceId: "price_year",
-      trialDays: 15,
+      trialDays: null,
       accountId: s.account.id,
       context: "selection_hud",
       successUrl: "https://api.keel.test/v1/billing/return/success",
