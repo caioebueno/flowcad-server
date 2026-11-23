@@ -18,7 +18,12 @@ export interface CreditPeriod {
   limitMicros: number;
   /** Set while Stripe is retrying a failed payment: the period's credits wait for it. */
   paymentFailed?: boolean;
+  /** A Free account's one-time starter credits: one period from the account's creation that never resets. */
+  isStarter?: boolean;
 }
+
+/** The starter period never ends; far enough out that no account outlives it. */
+const STARTER_PERIOD_END = new Date(Date.UTC(2100, 0, 1));
 
 function calendarMonth(at: Date) {
   const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1));
@@ -64,8 +69,16 @@ export function monthlySlice(periodStart: Date, periodEnd: Date, now: Date): { s
  * period, once Stripe collects the payment. Pack credits still work.
  */
 export async function creditPeriod(sql: Sql, accountId: string, plan: Plan, config: ConfigDoc, now = new Date()): Promise<CreditPeriod | null> {
-  if (plan.tier !== "pro") return null;
   const mpc = microsPerCredit(config);
+  if (plan.tier !== "pro") {
+    // Free: the starter credits, once. The period starts when the account was made, so its allowance row is
+    // always the same one and the credits never come back (Keel Make spec §9.1).
+    const starter = config.billing.starterCredits ?? 0;
+    if (starter <= 0) return null;
+    const [account] = await sql<{ created_at: Date }[]>`select created_at from accounts where id = ${accountId}`;
+    if (!account) return null;
+    return { start: account.created_at, end: STARTER_PERIOD_END, isTrial: false, isStarter: true, limitCredits: starter, limitMicros: Math.round(starter * mpc) };
+  }
   const make = (start: Date, end: Date, isTrial: boolean, unpaid = false): CreditPeriod => {
     const limitCredits = unpaid ? 0 : isTrial ? config.billing.trialCredits : plan.monthlyCredits;
     return { start, end, isTrial, limitCredits, limitMicros: Math.round(limitCredits * mpc), ...(unpaid ? { paymentFailed: true } : {}) };
@@ -135,6 +148,7 @@ export function creditsSummary(config: ConfigDoc, period: CreditPeriod, b: Credi
     extraExpiresAt: b.extraMicros > 0 ? (b.extraExpiresAt?.toISOString() ?? null) : null,
     resetsAt: period.end.toISOString(),
     isTrial: period.isTrial,
+    ...(period.isStarter ? { isStarter: true } : {}),
     low: isLow(config, period, b.monthlyUsedMicros),
     exhausted: isExhausted(period, b),
     left: creditsLeft(config, period, b),

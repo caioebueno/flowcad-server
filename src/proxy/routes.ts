@@ -62,10 +62,10 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
 
   const { accountId } = c.get("auth");
   const plan = await deps.plans.planFor(accountId, config.doc);
-  // AI needs Pro or a trial. Checked before the allowance so Free accounts
-  // see the upgrade sheet, not the allowance sheet.
-  if (plan.tier !== "pro") throw new ApiError(403, "plan_required", "The agent is part of Keel Pro");
-  const period = (await creditPeriod(deps.sql, accountId, plan, config.doc))!;
+  // AI needs Pro, a trial, or a Free account's starter credits (Keel Make spec §9.1). With starter credits
+  // turned off, Free accounts see the upgrade sheet, not the allowance sheet.
+  const period = await creditPeriod(deps.sql, accountId, plan, config.doc);
+  if (!period) throw new ApiError(403, "plan_required", "The agent is part of Keel Pro");
   const balance = await creditBalance(deps.sql, accountId, period);
   if (isExhausted(period, balance)) throw creditsExhausted(deps, period);
   const selfProfile = deps.selfHosted ? selfHostedProfile(config.doc, plan, body.taskType) : null;
@@ -75,8 +75,10 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
 const creditsExhausted = (deps: Deps, period: CreditPeriod) =>
   new ApiError(402, "credits_exhausted", "You're out of AI credits", {
     isTrial: period.isTrial,
+    ...(period.isStarter ? { isStarter: true } : {}),
     resetsAt: period.end.toISOString(),
-    canBuyPack: !period.isTrial && packsAvailable(deps),
+    // Packs are part of Pro: a Free account that used its starter credits is offered Pro instead.
+    canBuyPack: !period.isTrial && !period.isStarter && packsAvailable(deps),
     ...(period.paymentFailed ? { paymentFailed: true } : {}),
   });
 

@@ -4,6 +4,7 @@ import { requestId } from "hono/request-id";
 import type { AppEnv, Deps } from "./deps.js";
 import { ApiError } from "./errors.js";
 import { authRoutes, linkEmailRoutes } from "./auth/routes.js";
+import { ssoRoutes } from "./auth/ssoRoutes.js";
 import { billingPublicRoutes, billingRoutes } from "./billing/routes.js";
 import { requireAppVersion, requireAuth } from "./auth/middleware.js";
 import { proxyRoutes } from "./proxy/routes.js";
@@ -77,6 +78,7 @@ export function createApp(deps: Deps) {
   v1.route("/billing", billingPublicRoutes(deps));
 
   v1.use("*", requireAppVersion(deps));
+  v1.route("/auth/sso", ssoRoutes(deps));
   v1.route("/auth", authRoutes(deps));
 
   v1.get("/config", async (c) => {

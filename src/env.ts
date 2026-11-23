@@ -16,6 +16,11 @@ const EnvSchema = z.object({
   /** Resend sends sign-in codes. Without a key, development prints codes to the log. */
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().default("Keel <signin@keel.app>"),
+  /** WorkOS, for Single Sign-On. SSO routes answer 503 until both are set. */
+  WORKOS_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  WORKOS_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  /** The app's URL scheme callback for the end of an SSO sign-in. */
+  SSO_APP_CALLBACK: z.string().default("keel://auth/sso"),
   /** Stripe. Billing routes answer 503 until the key, webhook secret and a price are set. */
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),

@@ -86,7 +86,7 @@ export const DEFAULT_CONFIG: ConfigDoc = {
   // One credit is 1/150 of a dollar of model cost.
   credits: { perDollar: 150 },
   // 15-day trial with 1,000 credits (Pro prorated); packs of 1,000 for $10 that last 12 months.
-  billing: { trialDays: 15, trialCredits: 1_000, pack: { credits: 1_000, validMonths: 12 } },
+  billing: { trialDays: 15, trialCredits: 1_000, starterCredits: 300, pack: { credits: 1_000, validMonths: 12 } },
   minAppVersion: "0.0.0",
   features: {},
   enforceToolAllowlist: false,

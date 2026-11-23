@@ -13,7 +13,11 @@ import { log } from "./logger.js";
 import { EmailCodes } from "./auth/emailCodes.js";
 import { consoleMailer, disabledMailer, ResendMailer } from "./auth/mailer.js";
 import { StripeGateway } from "./billing/stripe.js";
+
 import { PostgresBlobStore, S3BlobStore } from "./storage/blobStore.js";
+
+import { WorkOSProvider } from "./auth/sso.js";
+
 
 const env = loadEnv();
 const sql = connect(env.DATABASE_URL);
@@ -38,6 +42,7 @@ const billing =
         automaticTax: env.STRIPE_AUTOMATIC_TAX === "true",
       })
     : null;
+if (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID) log.warn("sso_disabled", { reason: "WORKOS_API_KEY or WORKOS_CLIENT_ID not set" });
 if (!billing) log.warn("billing_disabled", { reason: "STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET not set" });
 
 const app = createApp({
@@ -57,6 +62,8 @@ const app = createApp({
       ? disabledMailer
       : consoleMailer,
   billing,
+  sso: env.WORKOS_API_KEY && env.WORKOS_CLIENT_ID ? new WorkOSProvider(env.WORKOS_API_KEY, env.WORKOS_CLIENT_ID) : null,
+  ssoAppCallback: env.SSO_APP_CALLBACK,
   publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/$/, ""),
   blobs: env.S3_BUCKET
     ? new S3BlobStore({

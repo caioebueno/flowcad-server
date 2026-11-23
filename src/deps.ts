@@ -8,7 +8,11 @@ import type { PlanProvider } from "./billing/plans.js";
 import type { EmailCodes } from "./auth/emailCodes.js";
 import type { Mailer } from "./auth/mailer.js";
 import type { BillingGateway } from "./billing/stripe.js";
+
 import type { BlobStore } from "./storage/blobStore.js";
+
+import type { SsoProvider } from "./auth/sso.js";
+
 
 /** Everything the routes need, injected so tests can swap Apple, Anthropic and billing. */
 export interface Deps {
@@ -25,7 +29,11 @@ export interface Deps {
   mailer: Mailer;
   /** null when Stripe isn't configured: billing routes answer 503. */
   billing: BillingGateway | null;
-  /** Public https origin of this service, for Stripe's return pages. */
+  /** null when WorkOS isn't configured: SSO routes answer 503. */
+  sso: SsoProvider | null;
+  /** Where the SSO callback hands the one-time code back to the app (a keel:// URL). */
+  ssoAppCallback: string;
+  /** Public https origin of this service, for Stripe's return pages and the SSO callback. */
   publicBaseUrl: string;
   projectHashSalt: string;
   /** Bytes of synced project files (models, photos, datasheets, exports). */

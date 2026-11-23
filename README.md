@@ -1,7 +1,7 @@
 # Keel account service
 
 The small web service between the Keel Mac app and Claude's API. It holds Keel's
-Anthropic key, signs people up and in (Apple or an emailed code), sells Keel Pro
+Anthropic key, signs people up and in (Apple, an emailed code, or Single Sign-On through WorkOS), sells Keel Pro
 through Stripe, sets the model and limits for each task type, streams agent turns
 through to Claude, records what every turn cost, and keeps each person's projects
 (chats, the model, context, outputs, files and exports) so they sync between their Macs.
@@ -19,6 +19,7 @@ billing with AI credits and credit packs), plus remote config from phase 2.
 | --- | --- |
 | `POST /auth/apple`, `/auth/refresh`, `/auth/logout` | Done. 15 minute access tokens, 60 day rotating refresh tokens stored as hashes, reuse revokes the device |
 | `POST /auth/email/start`, `/auth/email/verify` | Done. 6-digit codes, hashed, 10 minutes, 5 tries, 30 s between sends, 5 per email and 10 per IP an hour. Sign-up and sign-in are one step |
+| `POST /auth/sso/start`, `GET /auth/sso/callback`, `POST /auth/sso/verify` | Done. Single Sign-On through WorkOS: the work email's domain picks the organization, the browser round trip ends at `keel://auth/sso` with a one-time code, and the app trades it for tokens with its PKCE verifier. A profile from another organization is refused; an existing account with the same email opens. Off (503 `sso_unavailable`) until `WORKOS_API_KEY` and `WORKOS_CLIENT_ID` are set |
 | Apple and email on one account | Done. A verified Apple email opens the matching email account; `POST /account/email/start` and `/verify` link an email from Settings |
 | `GET /billing/plans`, `POST /billing/checkout`, `/billing/portal` | Done. Stripe Checkout in subscription mode with a 15-day trial (card required) once per account; Customer Portal for changes |
 | `POST /billing/packs/checkout`, `/billing/trial/end` | Done. One-time Checkout for 1,000 extra credits (Pro, not during a trial); "Start Pro now" ends a trial early |
@@ -83,6 +84,7 @@ in-flight streams 300 seconds to finish when a deploy replaces an instance.
    - `APPLE_CLIENT_ID` = the Mac app's bundle id
    - `NODE_ENV` = `production`
    - `PUBLIC_BASE_URL` = the service's public https address, for example `https://flowcad-server-production.up.railway.app`
+   - `WORKOS_API_KEY` and `WORKOS_CLIENT_ID` for Single Sign-On (in WorkOS, add `PUBLIC_BASE_URL/v1/auth/sso/callback` as a redirect URI), and optionally `SSO_APP_CALLBACK` (default `keel://auth/sso`)
    - `RESEND_API_KEY` and `EMAIL_FROM` (for example `Keel <signin@yourdomain.com>`, on a domain verified in Resend)
    - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTH`, `STRIPE_PRICE_YEAR`, `STRIPE_PRICE_PACK`, and optionally `STRIPE_AUTOMATIC_TAX=true`
    - For project files, add a **Bucket** to the Railway project (or use Cloudflare R2) and set
