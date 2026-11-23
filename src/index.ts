@@ -13,7 +13,11 @@ import { log } from "./logger.js";
 import { EmailCodes } from "./auth/emailCodes.js";
 import { consoleMailer, disabledMailer, ResendMailer } from "./auth/mailer.js";
 import { StripeGateway } from "./billing/stripe.js";
+
+import { PostgresBlobStore, S3BlobStore } from "./storage/blobStore.js";
+
 import { WorkOSProvider } from "./auth/sso.js";
+
 
 const env = loadEnv();
 const sql = connect(env.DATABASE_URL);
@@ -61,6 +65,16 @@ const app = createApp({
   sso: env.WORKOS_API_KEY && env.WORKOS_CLIENT_ID ? new WorkOSProvider(env.WORKOS_API_KEY, env.WORKOS_CLIENT_ID) : null,
   ssoAppCallback: env.SSO_APP_CALLBACK,
   publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/$/, ""),
+  blobs: env.S3_BUCKET
+    ? new S3BlobStore({
+        bucket: env.S3_BUCKET,
+        region: env.S3_REGION,
+        endpoint: env.S3_ENDPOINT,
+        accessKeyId: env.S3_ACCESS_KEY_ID!,
+        secretAccessKey: env.S3_SECRET_ACCESS_KEY!,
+      })
+    : new PostgresBlobStore(sql),
+  storage: { quotaBytes: env.STORAGE_QUOTA_BYTES, maxBlobBytes: env.BLOB_MAX_BYTES },
 });
 
 const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, (info) =>

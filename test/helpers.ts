@@ -15,6 +15,9 @@ import { EmailCodes } from "../src/auth/emailCodes.js";
 import type { Mailer } from "../src/auth/mailer.js";
 import type { BillingGateway, CheckoutInput, PackCheckoutInput } from "../src/billing/stripe.js";
 import Stripe from "stripe";
+
+import { PostgresBlobStore } from "../src/storage/blobStore.js";
+
 import type { SsoProfile, SsoProvider } from "../src/auth/sso.js";
 
 /** WorkOS stand-in: domains map to organizations, codes map to profiles. */
@@ -37,6 +40,7 @@ export class FakeSso implements SsoProvider {
     return p;
   }
 }
+
 
 export const CLIENT_ID = "app.keel.mac";
 let sql: Sql | null = null;
@@ -220,6 +224,9 @@ export function makeApp(
     selfHosted?: FakeUpstream | null;
     mailer?: FakeMailer;
     billing?: FakeBilling | null;
+
+    storage?: { quotaBytes: number; maxBlobBytes: number };
+
     sso?: FakeSso | null;
   } = {},
 ) {
@@ -243,6 +250,8 @@ export function makeApp(
     sso,
     ssoAppCallback: "keel://auth/sso",
     publicBaseUrl: "https://api.keel.test",
+    blobs: new PostgresBlobStore(db()),
+    storage: opts.storage ?? { quotaBytes: 50 * 1024 * 1024, maxBlobBytes: 10 * 1024 * 1024 },
   });
   return { app, upstream, mailer, billing, sso };
 }
