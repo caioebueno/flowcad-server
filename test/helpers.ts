@@ -15,6 +15,28 @@ import { EmailCodes } from "../src/auth/emailCodes.js";
 import type { Mailer } from "../src/auth/mailer.js";
 import type { BillingGateway, CheckoutInput, PackCheckoutInput } from "../src/billing/stripe.js";
 import Stripe from "stripe";
+import type { SsoProfile, SsoProvider } from "../src/auth/sso.js";
+
+/** WorkOS stand-in: domains map to organizations, codes map to profiles. */
+export class FakeSso implements SsoProvider {
+  organizations = new Map<string, string>([["acme.test", "org_acme"]]);
+  profiles = new Map<string, SsoProfile>();
+  lookups: string[] = [];
+  async organizationForDomain(domain: string) {
+    this.lookups.push(domain);
+    return this.organizations.get(domain) ?? null;
+  }
+  authorizeUrl(opts: { organizationId: string; redirectUri: string; state: string; loginHint?: string }) {
+    const url = new URL("https://sso.test/authorize");
+    for (const [k, v] of Object.entries(opts)) if (v) url.searchParams.set(k, v);
+    return url.toString();
+  }
+  async profile(code: string) {
+    const p = this.profiles.get(code);
+    if (!p) throw new Error("unknown code");
+    return p;
+  }
+}
 
 export const CLIENT_ID = "app.keel.mac";
 let sql: Sql | null = null;
@@ -198,11 +220,13 @@ export function makeApp(
     selfHosted?: FakeUpstream | null;
     mailer?: FakeMailer;
     billing?: FakeBilling | null;
+    sso?: FakeSso | null;
   } = {},
 ) {
   const upstream = opts.upstream ?? new FakeUpstream();
   const mailer = opts.mailer ?? new FakeMailer();
   const billing = opts.billing === undefined ? new FakeBilling() : opts.billing;
+  const sso = opts.sso === undefined ? new FakeSso() : opts.sso;
   const app = createApp({
     sql: db(),
     apple: appleVerifier(CLIENT_ID, jwks),
@@ -216,9 +240,11 @@ export function makeApp(
     emailCodes: new EmailCodes(db(), "test-code-secret"),
     mailer,
     billing,
+    sso,
+    ssoAppCallback: "keel://auth/sso",
     publicBaseUrl: "https://api.keel.test",
   });
-  return { app, upstream, mailer, billing };
+  return { app, upstream, mailer, billing, sso };
 }
 
 export type TestApp = ReturnType<typeof makeApp>["app"];
