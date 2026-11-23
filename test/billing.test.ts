@@ -1,3 +1,4 @@
+import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { describe, expect, it } from "vitest";
 import type Stripe from "stripe";
 import { authed, db, FakeBilling, makeApp, readSse, signedWebhook, signIn, turnBody } from "./helpers.js";
@@ -33,14 +34,41 @@ const account = async (app: ReturnType<typeof makeApp>["app"], token: string) =>
   };
 
 describe("Free accounts", () => {
-  it("get 403 plan_required from the agent, before the allowance check", async () => {
-    const { app } = makeApp();
+  it("get 403 plan_required from the agent when starter credits are off", async () => {
+    const { app } = makeApp({ config: { ...DEFAULT_CONFIG, billing: { ...DEFAULT_CONFIG.billing, starterCredits: 0 } } });
     const s = await signIn(app, undefined, undefined, null);
     const res = await app.request("/v1/agent/turn", { method: "POST", headers: authed(s.accessToken), body: JSON.stringify(turnBody()) });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("plan_required");
     const a = await account(app, s.accessToken);
     expect(a.entitlement).toMatchObject({ tier: "free", source: null, trialEligible: true });
+  });
+
+  it("can use the agent with their one-time starter credits, which never reset", async () => {
+    const { app } = makeApp();
+    const s = await signIn(app, undefined, undefined, null);
+    const before = (await (await app.request("/v1/account", { headers: authed(s.accessToken) })).json()) as {
+      entitlement: { tier: string };
+      credits: { monthlyLimit: number; left: number; isStarter?: boolean; resetsAt: string };
+    };
+    expect(before.entitlement.tier).toBe("free");
+    expect(before.credits).toMatchObject({ monthlyLimit: 300, left: 300, isStarter: true });
+    expect(before.credits.resetsAt.startsWith("2100-")).toBe(true);
+    const res = await app.request("/v1/agent/turn", { method: "POST", headers: authed(s.accessToken), body: JSON.stringify(turnBody()) });
+    expect(res.status).toBe(200);
+    await res.text();
+  });
+
+  it("are offered Pro, not a pack, when the starter credits run out", async () => {
+    const { app } = makeApp();
+    const s = await signIn(app, undefined, undefined, null);
+    await db()`insert into allowances (account_id, period_start, limit_micros, used_micros)
+      select id, date_trunc('milliseconds', created_at), 2000000, 10000000000 from accounts where id = ${s.account.id}
+      on conflict (account_id, period_start) do update set used_micros = excluded.used_micros`;
+    const res = await app.request("/v1/agent/turn", { method: "POST", headers: authed(s.accessToken), body: JSON.stringify(turnBody()) });
+    expect(res.status).toBe(402);
+    const err = (await res.json()) as { error: { code: string; details: Record<string, unknown> } };
+    expect(err.error).toMatchObject({ code: "credits_exhausted", details: { isStarter: true, canBuyPack: false } });
   });
 
   it("hand-assigned plans count as internal Pro", async () => {
