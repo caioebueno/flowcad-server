@@ -78,7 +78,7 @@ const creditsExhausted = (deps: Deps, period: CreditPeriod) =>
     ...(period.isStarter ? { isStarter: true } : {}),
     resetsAt: period.end.toISOString(),
     // Packs are part of Pro: a Free account that used its starter credits is offered Pro instead.
-    canBuyPack: !period.isTrial && !period.isStarter && packsAvailable(deps),
+    canBuyPack: !period.isStarter && packsAvailable(deps),
     ...(period.paymentFailed ? { paymentFailed: true } : {}),
   });
 

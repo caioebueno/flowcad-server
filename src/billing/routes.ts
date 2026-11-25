@@ -334,9 +334,7 @@ export function billingRoutes(deps: Deps) {
     const { doc } = await deps.config.current();
     const entitlement = await entitlementFor(deps.sql, accountId, doc);
     if (entitlement.tier !== "pro") throw new ApiError(403, "plan_required", "Credit packs are part of Keel Pro");
-    if (entitlement.source === "trial") {
-      throw new ApiError(409, "packs_unavailable_during_trial", "Credit packs can be bought once the trial ends");
-    }
+    // Trials still running from before the Free tier can buy packs too; the credits outlast the trial.
     const priceId = deps.billing?.packPriceId();
     if (!deps.billing || !priceId) throw unavailable();
     const billing = deps.billing;

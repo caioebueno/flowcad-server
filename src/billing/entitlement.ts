@@ -64,6 +64,5 @@ export async function entitlementFor(sql: Sql, accountId: string, config: Config
 /** Whether this server can sell credit packs at all (Stripe and a pack price are configured). */
 export const packsAvailable = (deps: Pick<Deps, "billing">) => !!deps.billing?.packPriceId();
 
-/** Packs are for Pro accounts outside a trial (AI spec > Spec 8). */
-export const canBuyPack = (deps: Pick<Deps, "billing">, e: Entitlement) =>
-  packsAvailable(deps) && e.tier === "pro" && e.source !== "trial";
+/** Packs are for Pro accounts, trials included now that no new trials start. */
+export const canBuyPack = (deps: Pick<Deps, "billing">, e: Entitlement) => packsAvailable(deps) && e.tier === "pro";

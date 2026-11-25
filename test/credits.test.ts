@@ -112,7 +112,7 @@ describe("credits on GET /account", () => {
     const { app, s, end } = await subscribed("trialing");
     const a = await account(app, s.accessToken);
     expect(a.entitlement).toMatchObject({ tier: "pro", source: "trial", interval: "year" });
-    expect(a.credits).toMatchObject({ monthlyUsed: 0, monthlyLimit: 1000, extra: 0, isTrial: true, low: false, exhausted: false, canBuyPack: false });
+    expect(a.credits).toMatchObject({ monthlyUsed: 0, monthlyLimit: 1000, extra: 0, isTrial: true, low: false, exhausted: false, canBuyPack: true });
     expect(Date.parse(a.credits!.resetsAt)).toBe(end * 1000);
   });
 
@@ -283,17 +283,19 @@ describe("credit packs", () => {
     });
   });
 
-  it("can't be bought on Free or during a trial", async () => {
+  it("can't be bought on Free", async () => {
     const { app } = makeApp();
     const free = await signIn(app, undefined, undefined, null);
     const res = await post(app, free.accessToken, "/v1/billing/packs/checkout");
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("plan_required");
+  });
 
+  it("can be bought during a trial that started before the Free tier", async () => {
     const trial = await subscribed("trialing");
     const t = await post(trial.app, trial.s.accessToken, "/v1/billing/packs/checkout");
-    expect(t.status).toBe(409);
-    expect(((await t.json()) as { error: { code: string } }).error.code).toBe("packs_unavailable_during_trial");
+    expect(t.status).toBe(200);
+    expect(await t.json()).toEqual({ url: "https://checkout.stripe.com/c/pay/pack" });
   });
 
   it("opens a one-time checkout for Pro that returns to the app", async () => {
