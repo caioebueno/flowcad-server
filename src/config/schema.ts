@@ -72,6 +72,29 @@ export const SelfHostedSchema = z.strictObject({
 });
 export type SelfHosted = z.infer<typeof SelfHostedSchema>;
 
+/**
+ * The agent's search_step_models (POST /search/step-models): ready-made STEP
+ * models of standard and bought-in parts, from these sites only. `direct`
+ * sites serve the file to anyone, so the app can download it itself.
+ */
+export const StepSearchSchema = z.strictObject({
+  enabled: z.boolean(),
+  sites: z
+    .array(
+      z.strictObject({
+        /** Matches the host and its subdomains, as "github.com". */
+        host: z.string().regex(/^[a-z0-9.-]+\.[a-z]+$/),
+        name: z.string().min(1),
+        direct: z.boolean(),
+        /** Said with every result from the site, when the site has one licence. */
+        license: z.string().optional(),
+      }),
+    )
+    .min(1),
+  searchesPerHour: z.number().int().positive(),
+});
+export type StepSearch = z.infer<typeof StepSearchSchema>;
+
 export const ConfigDocSchema = z.strictObject({
   taskProfiles: z.record(z.enum(TASK_TYPES), TaskProfileSchema),
   prices: z.record(z.string(), ModelPriceSchema),
@@ -114,5 +137,7 @@ export const ConfigDocSchema = z.strictObject({
   enforceToolAllowlist: z.boolean(),
   /** Off when absent. */
   selfHosted: SelfHostedSchema.optional(),
+  /** The bundled default when absent, so a config published before it still searches. */
+  stepSearch: StepSearchSchema.optional(),
 });
 export type ConfigDoc = z.infer<typeof ConfigDocSchema>;

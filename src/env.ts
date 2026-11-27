@@ -31,6 +31,8 @@ const EnvSchema = z.object({
   SELF_HOSTED_BASE_URL: z.preprocess((v) => (v === "" ? undefined : v), z.url().optional()),
   /** Sent as "Authorization: Bearer": vLLM's --api-key, or the Vast.ai portal token. */
   SELF_HOSTED_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  /** Brave Search API key for the agent's search_step_models. Unset, the search answers 503 search_unavailable. */
+  BRAVE_SEARCH_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   /** App Attest is phase 2. "off" accepts requests without an assertion. */
   APP_ATTEST_MODE: z.enum(["off", "enforce"]).default("off"),
 });

@@ -90,6 +90,23 @@ export const DEFAULT_CONFIG: ConfigDoc = {
   minAppVersion: "0.0.0",
   features: {},
   enforceToolAllowlist: false,
+  // STEP models for standard and bought-in parts. GitHub and GitLab hold open
+  // libraries (FreeCAD's parts library, KiCad's 3D models) whose files anyone
+  // can fetch; the rest are catalogues that need a sign-in, so only their pages.
+  stepSearch: {
+    enabled: true,
+    sites: [
+      { host: "github.com", name: "GitHub", direct: true },
+      { host: "raw.githubusercontent.com", name: "GitHub", direct: true },
+      { host: "gitlab.com", name: "GitLab", direct: true },
+      { host: "traceparts.com", name: "TraceParts", direct: false },
+      { host: "grabcad.com", name: "GrabCAD", direct: false },
+      { host: "3dcontentcentral.com", name: "3D ContentCentral", direct: false },
+      { host: "mcmaster.com", name: "McMaster-Carr", direct: false },
+      { host: "misumi-ec.com", name: "MISUMI", direct: false },
+    ],
+    searchesPerHour: 60,
+  },
   // Primary model for every live task type once SELF_HOSTED_BASE_URL is set;
   // Claude (taskProfiles above) is the fallback. 64K context on the server.
   selfHosted: {

@@ -13,6 +13,7 @@ import { log } from "./logger.js";
 import { EmailCodes } from "./auth/emailCodes.js";
 import { consoleMailer, disabledMailer, ResendMailer } from "./auth/mailer.js";
 import { StripeGateway } from "./billing/stripe.js";
+import { BraveSearch } from "./search/provider.js";
 
 const env = loadEnv();
 const sql = connect(env.DATABASE_URL);
@@ -57,7 +58,9 @@ const app = createApp({
       : consoleMailer,
   billing,
   publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/$/, ""),
+  search: env.BRAVE_SEARCH_API_KEY ? new BraveSearch(env.BRAVE_SEARCH_API_KEY) : null,
 });
+if (!env.BRAVE_SEARCH_API_KEY) log.warn("search_disabled", { reason: "BRAVE_SEARCH_API_KEY not set" });
 
 const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, (info) =>
   log.info("listening", { port: info.port }),

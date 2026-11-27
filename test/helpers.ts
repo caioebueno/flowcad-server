@@ -15,6 +15,7 @@ import { EmailCodes } from "../src/auth/emailCodes.js";
 import type { Mailer } from "../src/auth/mailer.js";
 import type { BillingGateway, CheckoutInput, PackCheckoutInput } from "../src/billing/stripe.js";
 import Stripe from "stripe";
+import type { SearchProvider } from "../src/search/provider.js";
 
 export const CLIENT_ID = "app.keel.mac";
 let sql: Sql | null = null;
@@ -180,6 +181,7 @@ export function makeApp(
     selfHosted?: FakeUpstream | null;
     mailer?: FakeMailer;
     billing?: FakeBilling | null;
+    search?: SearchProvider | null;
   } = {},
 ) {
   const upstream = opts.upstream ?? new FakeUpstream();
@@ -199,6 +201,7 @@ export function makeApp(
     mailer,
     billing,
     publicBaseUrl: "https://api.keel.test",
+    search: opts.search ?? null,
   });
   return { app, upstream, mailer, billing };
 }

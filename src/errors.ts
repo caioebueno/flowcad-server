@@ -27,6 +27,7 @@ export type ErrorCode =
   | "rate_limited"
   | "upstream_error"
   | "upstream_unavailable"
+  | "search_unavailable"
   | "internal";
 
 export class ApiError extends Error {
