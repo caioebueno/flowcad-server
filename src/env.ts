@@ -31,7 +31,13 @@ const EnvSchema = z.object({
   SELF_HOSTED_BASE_URL: z.preprocess((v) => (v === "" ? undefined : v), z.url().optional()),
   /** Sent as "Authorization: Bearer": vLLM's --api-key, or the Vast.ai portal token. */
   SELF_HOSTED_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
-  /** Brave Search API key for the agent's search_step_models. Unset, the search answers 503 search_unavailable. */
+  /**
+   * Search for the agent's search_step_models: a SearXNG instance (preferred,
+   * JSON format on), else a Brave Search API key. GitHub code search is added
+   * when GITHUB_SEARCH_TOKEN is set. With none, the search answers 503.
+   */
+  SEARXNG_URL: z.preprocess((v) => (v === "" ? undefined : v), z.url().optional()),
+  GITHUB_SEARCH_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   BRAVE_SEARCH_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   /** App Attest is phase 2. "off" accepts requests without an assertion. */
   APP_ATTEST_MODE: z.enum(["off", "enforce"]).default("off"),

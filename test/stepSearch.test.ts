@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { ConfigDocSchema, type ConfigDoc } from "../src/config/schema.js";
-import type { SearchProvider, WebResult } from "../src/search/provider.js";
+import { CombinedSearch, GitHubStepSearch, SearxngSearch, type SearchProvider, type WebResult } from "../src/search/provider.js";
 import { resetSearchState } from "../src/search/routes.js";
 import { buildQuery, directFile, plain, siteFor, toStepModels } from "../src/search/stepModels.js";
 import { authed, makeApp, signIn } from "./helpers.js";
@@ -61,6 +61,39 @@ describe("step model results", () => {
     expect(out[0]!.fileUrl).toBe("https://raw.githubusercontent.com/a/b/main/608.step");
     expect(out[1]).toMatchObject({ fileUrl: null, source: "TraceParts", snippet: "Deep groove" });
     expect(plain("<b>a</b>&nbsp;&quot;b&quot;", 10)).toBe('a "b"');
+  });
+});
+
+describe("search providers", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const answer = (body: unknown, status = 200) => vi.fn(async (_url: URL) => new Response(JSON.stringify(body), { status }));
+
+  it("reads SearXNG's JSON", async () => {
+    const fetch = answer({ results: [{ title: "608zz", url: "https://grabcad.com/library/608zz", content: "Bearing" }, { url: "https://x" }] });
+    vi.stubGlobal("fetch", fetch);
+    const out = await new SearxngSearch("https://searx.example").search("608 bearing", 5);
+    expect(out).toEqual([{ title: "608zz", url: "https://grabcad.com/library/608zz", description: "Bearing" }]);
+    const called = fetch.mock.calls[0]![0];
+    expect(called.pathname).toBe("/search");
+    expect(called.searchParams.get("format")).toBe("json");
+    vi.stubGlobal("fetch", answer({}, 403));
+    await expect(new SearxngSearch("https://searx.example").search("x", 5)).rejects.toThrow("searxng_403");
+  });
+
+  it("asks GitHub for .step and .stp files without the site operators", async () => {
+    const fetch = answer({ items: [{ name: "608.step", html_url: "https://github.com/a/b/blob/main/608.step", repository: { full_name: "a/b" } }] });
+    vi.stubGlobal("fetch", fetch);
+    const out = await new GitHubStepSearch("t").search(buildQuery("608 bearing", sites), 5);
+    expect(fetch.mock.calls.map((c) => c[0].searchParams.get("q"))).toEqual(["608 bearing extension:step", "608 bearing extension:stp"]);
+    expect(out[0]).toEqual({ title: "608.step", url: "https://github.com/a/b/blob/main/608.step", description: "a/b" });
+    expect(toStepModels(out, sites, 5)[0]!.fileUrl).toBe("https://raw.githubusercontent.com/a/b/main/608.step");
+  });
+
+  it("combines providers and survives one failing", async () => {
+    const ok: SearchProvider = { search: async () => [{ title: "a", url: "https://github.com/a" }] };
+    const bad: SearchProvider = { search: async () => { throw new Error("down"); } };
+    expect(await new CombinedSearch([bad, ok]).search("q", 5)).toHaveLength(1);
+    await expect(new CombinedSearch([bad, bad]).search("q", 5)).rejects.toThrow("down");
   });
 });
 

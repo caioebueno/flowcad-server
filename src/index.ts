@@ -13,7 +13,7 @@ import { log } from "./logger.js";
 import { EmailCodes } from "./auth/emailCodes.js";
 import { consoleMailer, disabledMailer, ResendMailer } from "./auth/mailer.js";
 import { StripeGateway } from "./billing/stripe.js";
-import { BraveSearch } from "./search/provider.js";
+import { BraveSearch, CombinedSearch, GitHubStepSearch, SearxngSearch, type SearchProvider } from "./search/provider.js";
 
 const env = loadEnv();
 const sql = connect(env.DATABASE_URL);
@@ -58,9 +58,19 @@ const app = createApp({
       : consoleMailer,
   billing,
   publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/$/, ""),
-  search: env.BRAVE_SEARCH_API_KEY ? new BraveSearch(env.BRAVE_SEARCH_API_KEY) : null,
+  search: searchProvider(),
 });
-if (!env.BRAVE_SEARCH_API_KEY) log.warn("search_disabled", { reason: "BRAVE_SEARCH_API_KEY not set" });
+
+function searchProvider(): SearchProvider | null {
+  const web = env.SEARXNG_URL ? new SearxngSearch(env.SEARXNG_URL) : env.BRAVE_SEARCH_API_KEY ? new BraveSearch(env.BRAVE_SEARCH_API_KEY) : null;
+  // GitHub first: its hits are files Keel can import straight away.
+  const providers = [env.GITHUB_SEARCH_TOKEN ? new GitHubStepSearch(env.GITHUB_SEARCH_TOKEN) : null, web].filter((p) => p !== null);
+  if (providers.length === 0) {
+    log.warn("search_disabled", { reason: "SEARXNG_URL, BRAVE_SEARCH_API_KEY and GITHUB_SEARCH_TOKEN not set" });
+    return null;
+  }
+  return providers.length === 1 ? providers[0]! : new CombinedSearch(providers);
+}
 
 const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, (info) =>
   log.info("listening", { port: info.port }),

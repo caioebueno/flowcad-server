@@ -23,7 +23,7 @@ billing with AI credits and credit packs), plus remote config from phase 2.
 | `POST /billing/stripe/webhook` | Done. Signature checked, each event applied once, the only thing that moves an account between Free and Pro |
 | Pro gating | Done. Free accounts get `403 plan_required` from the agent; `GET /account` returns `entitlement` |
 | `POST /agent/turn`, `/agent/keepwarm` | Done. Task profiles, request checks, run caps, streaming, `keel.usage` / `keel.warning` / `keel.error` events |
-| `POST /search/step-models` | Done. The agent's `search_step_models`: Brave web search over the sites in `stepSearch`, Pro only, 60 searches an hour, answers cached an hour. See below |
+| `POST /search/step-models` | Done. The agent's `search_step_models`: SearXNG (or Brave) web search, plus GitHub code search, over the sites in `stepSearch`, Pro only, 60 searches an hour, answers cached an hour. See below |
 | `GET /usage`, `GET /account`, device list and revoke | Done. Usage shown in credits, never dollars |
 | `GET /config` | Done. Versioned in `config_versions`, served with an ETag |
 | AI credits | Done. 2,000 a billing period on Pro, 1,000 for the trial, packs used after; `credits_low` warning at 20% left, `402 credits_exhausted` at zero. Contract: `/mnt/project-files/keel-account-service/api-pro-and-credits.md` |
@@ -79,7 +79,7 @@ in-flight streams 300 seconds to finish when a deploy replaces an instance.
    - `PUBLIC_BASE_URL` = the service's public https address, for example `https://flowcad-server-production.up.railway.app`
    - `RESEND_API_KEY` and `EMAIL_FROM` (for example `Keel <signin@yourdomain.com>`, on a domain verified in Resend)
    - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTH`, `STRIPE_PRICE_YEAR`, `STRIPE_PRICE_PACK`, and optionally `STRIPE_AUTOMATIC_TAX=true`
-   - `BRAVE_SEARCH_API_KEY` from [Brave Search API](https://api-dashboard.search.brave.com), for the agent's STEP model search (without it the search answers 503 `search_unavailable`)
+   - For the agent's STEP model search: `SEARXNG_URL`, the address of Keel's SearXNG service (its settings.yml must allow the `json` format), or else `BRAVE_SEARCH_API_KEY`; and optionally `GITHUB_SEARCH_TOKEN`, a GitHub token with public read access, which adds GitHub code search for `.step`/`.stp` files. With none of them the search answers 503 `search_unavailable`
 3. Generate a public domain under the service's Networking settings, or attach `api.keel.app`.
 4. In Stripe: create a **Keel Pro** product with a $39 monthly and a $390 yearly recurring price,
    and a **Keel AI credits** product with a one-time $10 price for 1,000 credits (the three ids
@@ -134,7 +134,9 @@ with `{ "query": "608 2RS bearing", "limit": 5 }`. So it works the same on Claud
 on the self-hosted model, and the turn still sends no server tools.
 
 The server adds the sites in `stepSearch.sites` to the query as `site:` operators,
-asks Brave, keeps only https results on those sites, and answers
+asks SearXNG (or Brave, when only its key is set), and, with `GITHUB_SEARCH_TOKEN`,
+GitHub code search for `.step`/`.stp` files at the same time, GitHub's first. A
+provider that fails is skipped. It keeps only https results on those sites, and answers
 `{ "results": [{ "title", "url", "fileUrl", "source", "snippet", "license" }] }`.
 `fileUrl` is set only for a `.step`/`.stp` page on a `direct` site (a GitHub blob
 becomes its raw.githubusercontent.com address, a GitLab blob its `/-/raw/` one); the
@@ -145,7 +147,7 @@ the model wrote, and opens Keel's Import sheet on it.
 Change the sites, turn it off or change the hourly limit in remote config
 (`stepSearch`); a config published without `stepSearch` uses the bundled default.
 Queries are not stored: the log has their length and the result count. Searches
-cost no credits yet (Brave bills about $5 per 1,000).
+cost no credits.
 
 ## Self-hosted model
 
