@@ -17,6 +17,32 @@ import type { BillingGateway, CheckoutInput, PackCheckoutInput } from "../src/bi
 import Stripe from "stripe";
 import type { SearchProvider } from "../src/search/provider.js";
 
+import { PostgresBlobStore } from "../src/storage/blobStore.js";
+
+import type { SsoProfile, SsoProvider } from "../src/auth/sso.js";
+
+/** WorkOS stand-in: domains map to organizations, codes map to profiles. */
+export class FakeSso implements SsoProvider {
+  organizations = new Map<string, string>([["acme.test", "org_acme"]]);
+  profiles = new Map<string, SsoProfile>();
+  lookups: string[] = [];
+  async organizationForDomain(domain: string) {
+    this.lookups.push(domain);
+    return this.organizations.get(domain) ?? null;
+  }
+  authorizeUrl(opts: { organizationId: string; redirectUri: string; state: string; loginHint?: string }) {
+    const url = new URL("https://sso.test/authorize");
+    for (const [k, v] of Object.entries(opts)) if (v) url.searchParams.set(k, v);
+    return url.toString();
+  }
+  async profile(code: string) {
+    const p = this.profiles.get(code);
+    if (!p) throw new Error("unknown code");
+    return p;
+  }
+}
+
+
 export const CLIENT_ID = "app.keel.mac";
 let sql: Sql | null = null;
 export const db = () => (sql ??= connect(process.env.TEST_DATABASE_URL!, { max: 4 }));
@@ -153,6 +179,7 @@ export class FakeBilling implements BillingGateway {
   }
   async createCheckout(input: CheckoutInput) {
     this.checkouts.push(input);
+    this.openCheckouts.set(input.customerId, (this.openCheckouts.get(input.customerId) ?? 0) + 1);
     return "https://checkout.stripe.com/c/pay/test";
   }
   async createPortal() {
@@ -162,6 +189,23 @@ export class FakeBilling implements BillingGateway {
     const sub = this.subscriptions.get(id);
     if (!sub) throw new Error(`no subscription ${id}`);
     return sub;
+  }
+  cancelled: string[] = [];
+  async cancelSubscription(id: string) {
+    this.cancelled.push(id);
+    const sub = await this.retrieveSubscription(id);
+    const next = { ...sub, status: "canceled" } as Stripe.Subscription;
+    this.subscriptions.set(id, next);
+    return next;
+  }
+  /** Open Checkout sessions per customer; each createCheckout opens one, expireOpenCheckouts closes them. */
+  openCheckouts = new Map<string, number>();
+  expiredCheckouts = 0;
+  async expireOpenCheckouts(customerId: string) {
+    const n = this.openCheckouts.get(customerId) ?? 0;
+    this.openCheckouts.set(customerId, 0);
+    this.expiredCheckouts += n;
+    return n;
   }
   verifyWebhook(raw: string, signature: string) {
     return stripeForSigning.webhooks.constructEventAsync(raw, signature, WEBHOOK_SECRET);
@@ -182,11 +226,16 @@ export function makeApp(
     mailer?: FakeMailer;
     billing?: FakeBilling | null;
     search?: SearchProvider | null;
+
+    storage?: { quotaBytes: number; maxBlobBytes: number };
+
+    sso?: FakeSso | null;
   } = {},
 ) {
   const upstream = opts.upstream ?? new FakeUpstream();
   const mailer = opts.mailer ?? new FakeMailer();
   const billing = opts.billing === undefined ? new FakeBilling() : opts.billing;
+  const sso = opts.sso === undefined ? new FakeSso() : opts.sso;
   const app = createApp({
     sql: db(),
     apple: appleVerifier(CLIENT_ID, jwks),
@@ -200,10 +249,14 @@ export function makeApp(
     emailCodes: new EmailCodes(db(), "test-code-secret"),
     mailer,
     billing,
+    sso,
+    ssoAppCallback: "keel://auth/sso",
     publicBaseUrl: "https://api.keel.test",
     search: opts.search ?? null,
+    blobs: new PostgresBlobStore(db()),
+    storage: opts.storage ?? { quotaBytes: 50 * 1024 * 1024, maxBlobBytes: 10 * 1024 * 1024 },
   });
-  return { app, upstream, mailer, billing };
+  return { app, upstream, mailer, billing, sso };
 }
 
 export type TestApp = ReturnType<typeof makeApp>["app"];

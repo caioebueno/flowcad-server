@@ -47,6 +47,10 @@ export interface BillingGateway {
   createCheckout(input: CheckoutInput): Promise<string>;
   createPortal(input: { customerId: string; returnUrl: string }): Promise<string>;
   retrieveSubscription(id: string): Promise<Stripe.Subscription>;
+  /** Cancels a subscription now (a duplicate), and returns it as Stripe has it after. */
+  cancelSubscription(id: string): Promise<Stripe.Subscription>;
+  /** Expires the customer's open subscription Checkout sessions, so only the newest can be completed. Returns how many. */
+  expireOpenCheckouts(customerId: string): Promise<number>;
   verifyWebhook(rawBody: string, signature: string): Promise<Stripe.Event>;
 }
 
@@ -165,6 +169,26 @@ export class StripeGateway implements BillingGateway {
 
   retrieveSubscription(id: string) {
     return this.stripe.subscriptions.retrieve(id);
+  }
+
+  cancelSubscription(id: string) {
+    // Prorated, so a duplicate that was already paid leaves a credit on the customer, and support can refund it.
+    return this.stripe.subscriptions.cancel(id, { prorate: true });
+  }
+
+  async expireOpenCheckouts(customerId: string) {
+    let expired = 0;
+    for await (const session of this.stripe.checkout.sessions.list({ customer: customerId, status: "open", limit: 100 })) {
+      if (session.mode !== "subscription") continue;
+      try {
+        await this.stripe.checkout.sessions.expire(session.id);
+        expired++;
+      } catch (err) {
+        // Completed or expired in the meantime: nothing left to stop.
+        if ((err as { type?: string }).type !== "StripeInvalidRequestError") throw err;
+      }
+    }
+    return expired;
   }
 
   verifyWebhook(rawBody: string, signature: string) {

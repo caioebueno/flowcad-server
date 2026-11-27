@@ -126,6 +126,11 @@ export const ConfigDocSchema = z.strictObject({
     trialDays: z.number().int().min(0).max(90),
     /** Credits for the whole trial, in place of the plan's monthly credits. */
     trialCredits: z.number().int().nonnegative(),
+    /**
+     * Credits a Free account gets once, so a new maker can design something before paying (Keel Make
+     * spec §9.1). 0 turns Free AI off again. Optional so stored config docs from before keep parsing.
+     */
+    starterCredits: z.number().int().nonnegative().default(300),
     /** One-time credit packs, bought through Stripe Checkout. */
     pack: z.strictObject({
       credits: z.number().int().positive(),

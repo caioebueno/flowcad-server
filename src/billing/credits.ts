@@ -16,7 +16,14 @@ export interface CreditPeriod {
   isTrial: boolean;
   limitCredits: number;
   limitMicros: number;
+  /** Set while Stripe is retrying a failed payment: the period's credits wait for it. */
+  paymentFailed?: boolean;
+  /** A Free account's one-time starter credits: one period from the account's creation that never resets. */
+  isStarter?: boolean;
 }
+
+/** The starter period never ends; far enough out that no account outlives it. */
+const STARTER_PERIOD_END = new Date(Date.UTC(2100, 0, 1));
 
 function calendarMonth(at: Date) {
   const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1));
@@ -24,26 +31,74 @@ function calendarMonth(at: Date) {
   return { start, end };
 }
 
+/** `start` moved forward by whole calendar months, with the day clamped to the month's length (Jan 31 + 1 = Feb 28). */
+export function addMonths(start: Date, months: number): Date {
+  const y = start.getUTCFullYear();
+  const m = start.getUTCMonth() + months;
+  const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return new Date(
+    Date.UTC(y, m, Math.min(start.getUTCDate(), lastDay), start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds(), start.getUTCMilliseconds()),
+  );
+}
+
+/**
+ * The monthly slice of a longer billing period that contains `now`. A yearly
+ * subscription still gets its credits every month, counted from the day the
+ * billing period started; the last slice ends with the period.
+ */
+export function monthlySlice(periodStart: Date, periodEnd: Date, now: Date): { start: Date; end: Date } {
+  let start = periodStart;
+  for (let i = 1; i <= 12 * 100; i++) {
+    const next = addMonths(periodStart, i);
+    if (next >= periodEnd) return { start, end: periodEnd };
+    if (next > now) return { start, end: next };
+    start = next;
+  }
+  return { start, end: periodEnd };
+}
+
 /**
  * The credit period an account is in now. Stripe plans follow the subscription:
- * the trial is one period with the trial credits, then each billing period gets
- * the plan's monthly credits. Hand-assigned plans use the calendar month.
+ * the trial is one period with the trial credits, then each month of the
+ * billing period gets the plan's monthly credits (a yearly price is split
+ * into monthly slices). Hand-assigned plans use the calendar month.
  * Free accounts have no period (and no AI).
+ *
+ * While a payment is failing (`past_due`) Pro stays on, but a period that
+ * hasn't been paid for gets no monthly credits: they arrive, in the same
+ * period, once Stripe collects the payment. Pack credits still work.
  */
 export async function creditPeriod(sql: Sql, accountId: string, plan: Plan, config: ConfigDoc, now = new Date()): Promise<CreditPeriod | null> {
-  if (plan.tier !== "pro") return null;
   const mpc = microsPerCredit(config);
-  const make = (start: Date, end: Date, isTrial: boolean): CreditPeriod => {
-    const limitCredits = isTrial ? config.billing.trialCredits : plan.monthlyCredits;
-    return { start, end, isTrial, limitCredits, limitMicros: Math.round(limitCredits * mpc) };
+  if (plan.tier !== "pro") {
+    // Free: the starter credits, once. The period starts when the account was made, so its allowance row is
+    // always the same one and the credits never come back (Keel Make spec §9.1).
+    const starter = config.billing.starterCredits ?? 0;
+    if (starter <= 0) return null;
+    const [account] = await sql<{ created_at: Date }[]>`select created_at from accounts where id = ${accountId}`;
+    if (!account) return null;
+    return { start: account.created_at, end: STARTER_PERIOD_END, isTrial: false, isStarter: true, limitCredits: starter, limitMicros: Math.round(starter * mpc) };
+  }
+  const make = (start: Date, end: Date, isTrial: boolean, unpaid = false): CreditPeriod => {
+    const limitCredits = unpaid ? 0 : isTrial ? config.billing.trialCredits : plan.monthlyCredits;
+    return { start, end, isTrial, limitCredits, limitMicros: Math.round(limitCredits * mpc), ...(unpaid ? { paymentFailed: true } : {}) };
   };
   if (!HAND_ASSIGNED_PLANS.has(plan.id)) {
-    const [sub] = await sql<{ status: string; current_period_start: Date | null; current_period_end: Date | null; trial_end: Date | null }[]>`
-      select status, current_period_start, current_period_end, trial_end from subscriptions
+    const [sub] = await sql<
+      { status: string; current_period_start: Date | null; current_period_end: Date | null; trial_end: Date | null; price_interval: string | null }[]
+    >`
+      select status, current_period_start, current_period_end, trial_end, price_interval from subscriptions
       where account_id = ${accountId} and status = any(${LIVE_STATUSES})
       order by updated_at desc limit 1`;
-    const end = sub ? (sub.status === "trialing" ? (sub.trial_end ?? sub.current_period_end) : sub.current_period_end) : null;
-    if (sub?.current_period_start && end && end > now) return make(sub.current_period_start, end, sub.status === "trialing");
+    const trialing = sub?.status === "trialing";
+    const end = sub ? (trialing ? (sub.trial_end ?? sub.current_period_end) : sub.current_period_end) : null;
+    if (sub?.current_period_start && end && end > now) {
+      const unpaid = sub.status === "past_due";
+      if (trialing) return make(sub.current_period_start, end, true);
+      // Monthly prices are already one month long; anything longer is sliced.
+      const slice = sub.price_interval === "month" ? { start: sub.current_period_start, end } : monthlySlice(sub.current_period_start, end, now);
+      return make(slice.start, slice.end, false, unpaid);
+    }
   }
   const { start, end } = calendarMonth(now);
   return make(start, end, false);
@@ -93,6 +148,7 @@ export function creditsSummary(config: ConfigDoc, period: CreditPeriod, b: Credi
     extraExpiresAt: b.extraMicros > 0 ? (b.extraExpiresAt?.toISOString() ?? null) : null,
     resetsAt: period.end.toISOString(),
     isTrial: period.isTrial,
+    ...(period.isStarter ? { isStarter: true } : {}),
     low: isLow(config, period, b.monthlyUsedMicros),
     exhausted: isExhausted(period, b),
     left: creditsLeft(config, period, b),

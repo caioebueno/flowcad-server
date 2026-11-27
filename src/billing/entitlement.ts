@@ -54,7 +54,8 @@ export async function entitlementFor(sql: Sql, accountId: string, config: Config
     source,
     interval,
     expiresAt: expiresAt?.toISOString() ?? null,
-    trialEligible: !a?.trial_used_at,
+    // No new trials: the Free tier's starter credits replaced the Pro trial. Kept for older apps.
+    trialEligible: false,
     cancelAtPeriodEnd: sub?.cancel_at_period_end ?? false,
     paymentFailed: sub?.status === "past_due",
   };
@@ -63,6 +64,5 @@ export async function entitlementFor(sql: Sql, accountId: string, config: Config
 /** Whether this server can sell credit packs at all (Stripe and a pack price are configured). */
 export const packsAvailable = (deps: Pick<Deps, "billing">) => !!deps.billing?.packPriceId();
 
-/** Packs are for Pro accounts outside a trial (AI spec > Spec 8). */
-export const canBuyPack = (deps: Pick<Deps, "billing">, e: Entitlement) =>
-  packsAvailable(deps) && e.tier === "pro" && e.source !== "trial";
+/** Packs are for Pro accounts, trials included now that no new trials start. */
+export const canBuyPack = (deps: Pick<Deps, "billing">, e: Entitlement) => packsAvailable(deps) && e.tier === "pro";

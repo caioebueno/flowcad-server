@@ -4,17 +4,19 @@ import { requestId } from "hono/request-id";
 import type { AppEnv, Deps } from "./deps.js";
 import { ApiError } from "./errors.js";
 import { authRoutes, linkEmailRoutes } from "./auth/routes.js";
+import { ssoRoutes } from "./auth/ssoRoutes.js";
 import { billingPublicRoutes, billingRoutes } from "./billing/routes.js";
 import { requireAppVersion, requireAuth } from "./auth/middleware.js";
 import { proxyRoutes } from "./proxy/routes.js";
 import { accountRoutes } from "./ledger/routes.js";
 import { searchRoutes } from "./search/routes.js";
+import { projectRoutes } from "./projects/routes.js";
 import { log } from "./logger.js";
 import { appliedMigrations } from "./db/index.js";
 import Stripe from "stripe";
 
 /** Bump when adding a file to migrations/. The health check fails until all are applied. */
-export const EXPECTED_MIGRATIONS = 3;
+export const EXPECTED_MIGRATIONS = 5;
 
 export function createApp(deps: Deps) {
   const app = new Hono<AppEnv>();
@@ -77,6 +79,7 @@ export function createApp(deps: Deps) {
   v1.route("/billing", billingPublicRoutes(deps));
 
   v1.use("*", requireAppVersion(deps));
+  v1.route("/auth/sso", ssoRoutes(deps));
   v1.route("/auth", authRoutes(deps));
 
   v1.get("/config", async (c) => {
@@ -95,6 +98,7 @@ export function createApp(deps: Deps) {
   authed.route("/search", searchRoutes(deps));
   authed.route("/account", linkEmailRoutes(deps));
   authed.route("/", accountRoutes(deps));
+  authed.route("/", projectRoutes(deps));
   v1.route("/", authed);
 
   app.route("/v1", v1);

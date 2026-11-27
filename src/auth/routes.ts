@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { AppEnv, Deps } from "../deps.js";
 import type { Sql } from "../db/index.js";
+import { rateLimitIp } from "../util/clientIp.js";
 import { ApiError } from "../errors.js";
 import { parseJson } from "../util/validate.js";
 import { IdentityTokenError } from "./apple.js";
@@ -10,7 +11,7 @@ import { issueRefreshToken, revokeDevice, rotateRefreshToken } from "./tokens.js
 import { normaliseEmail } from "./emailCodes.js";
 import { log } from "../logger.js";
 
-const Device = z.strictObject({
+export const Device = z.strictObject({
   id: z.uuid(),
   name: z.string().max(200).optional(),
   appVersion: z.string().max(50).optional(),
@@ -18,7 +19,7 @@ const Device = z.strictObject({
 type Device = z.infer<typeof Device>;
 
 /** App Attest (phase 2): key id and attestation object for a new key. */
-const Attestation = z
+export const Attestation = z
   .strictObject({ keyId: z.string().max(200), attestationObject: z.string().max(65_536), clientDataHash: z.string().max(200) })
   .optional();
 
@@ -46,10 +47,10 @@ const RefreshBody = z.strictObject({ refreshToken: z.string().min(1).max(200) })
 export const clientIp = (c: Context) =>
   c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "unknown";
 
-type AccountRow = { id: string; plan: string; status: string };
+export type AccountRow = { id: string; plan: string; status: string };
 
 /** Registers (or re-registers) the device on the account, then issues tokens. */
-async function completeSignIn(deps: Deps, account: AccountRow & { created: boolean }, device: Device, attestKeyId?: string) {
+export async function completeSignIn(deps: Deps, account: AccountRow & { created: boolean }, device: Device, attestKeyId?: string) {
   if (account.status !== "active") throw new ApiError(403, "account_suspended", "Account is not active");
   await deps.sql.begin(async (tx) => {
     // A device id belongs to one account. If it shows up under another
@@ -142,7 +143,7 @@ export function authRoutes(deps: Deps) {
   app.post("/email/start", async (c) => {
     const body = await parseJson(c, EmailStartBody);
     const email = normaliseEmail(body.email);
-    const code = await deps.emailCodes.issue({ email, purpose: "sign_in", ip: clientIp(c), deviceId: body.device.id });
+    const code = await deps.emailCodes.issue({ email, purpose: "sign_in", ip: rateLimitIp(c), deviceId: body.device.id });
     try {
       await deps.mailer.sendSignInCode({ to: email, code });
     } catch (err) {
@@ -204,7 +205,7 @@ export function linkEmailRoutes(deps: Deps) {
     const email = normaliseEmail((await parseJson(c, Body)).email);
     const [owner] = await deps.sql<{ id: string }[]>`select id from accounts where email = ${email}`;
     if (owner && owner.id !== accountId) throw new ApiError(409, "email_taken", "That email belongs to another Keel account");
-    const code = await deps.emailCodes.issue({ email, purpose: "link", ip: clientIp(c), accountId });
+    const code = await deps.emailCodes.issue({ email, purpose: "link", ip: rateLimitIp(c), accountId });
     await deps.mailer.sendSignInCode({ to: email, code }).catch(() => {
       throw new ApiError(503, "upstream_unavailable", "Couldn't send the email. Try again in a moment.");
     });

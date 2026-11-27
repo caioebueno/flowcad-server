@@ -1,3 +1,4 @@
+import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { describe, expect, it } from "vitest";
 import type Stripe from "stripe";
 import { authed, db, FakeBilling, makeApp, readSse, signedWebhook, signIn, textReply, turnBody } from "./helpers.js";
@@ -64,17 +65,21 @@ const post = (app: App, token: string, path: string, body: unknown = {}) =>
   app.request(path, { method: "POST", headers: authed(token), body: JSON.stringify(body) });
 
 /** A Free account with a Stripe customer, put on a subscription through the webhook. */
-async function subscribed(status: "trialing" | "active", billing = new FakeBilling()) {
+async function subscribed(
+  status: "trialing" | "active" | "past_due",
+  billing = new FakeBilling(),
+  opts: { interval?: "month" | "year"; start?: number; end?: number } = {},
+) {
   const made = makeApp({ billing });
   const s = await signIn(made.app, undefined, undefined, null);
   const customer = `cus_cr_${s.account.id.slice(0, 8)}`;
   await db()`update accounts set stripe_customer_id = ${customer} where id = ${s.account.id}`;
   const subId = `sub_cr_${s.account.id.slice(0, 8)}`;
-  const start = now() - DAY;
-  const end = status === "trialing" ? start + 15 * DAY : start + 365 * DAY;
+  const start = opts.start ?? now() - DAY;
+  const end = opts.end ?? (status === "trialing" ? start + 15 * DAY : start + (opts.interval === "month" ? 30 : 365) * DAY);
   billing.subscriptions.set(
     subId,
-    subscription(subId, customer, s.account.id, status, { start, end, trialEnd: status === "trialing" ? end : null }),
+    subscription(subId, customer, s.account.id, status, { start, end, trialEnd: status === "trialing" ? end : null, interval: opts.interval }),
   );
   expect((await deliver(made.app, event("customer.subscription.created", { id: subId }))).status).toBe(200);
   return { ...made, s, customer, subId, start, end };
@@ -94,22 +99,25 @@ const packPaid = (accountId: string, pi: string) =>
   });
 
 describe("credits on GET /account", () => {
-  it("is null on Free", async () => {
+  it("is the one-time starter credits on Free, and null with them turned off", async () => {
     const { app } = makeApp();
     const s = await signIn(app, undefined, undefined, null);
-    expect((await account(app, s.accessToken)).credits).toBeNull();
+    expect((await account(app, s.accessToken)).credits).toMatchObject({ monthlyLimit: 300, left: 300, isTrial: false, canBuyPack: false });
+    const off = makeApp({ config: { ...DEFAULT_CONFIG, billing: { ...DEFAULT_CONFIG.billing, starterCredits: 0 } } });
+    const t = await signIn(off.app, undefined, undefined, null);
+    expect((await account(off.app, t.accessToken)).credits).toBeNull();
   });
 
   it("gives a trial 1,000 credits that reset when the trial ends", async () => {
     const { app, s, end } = await subscribed("trialing");
     const a = await account(app, s.accessToken);
     expect(a.entitlement).toMatchObject({ tier: "pro", source: "trial", interval: "year" });
-    expect(a.credits).toMatchObject({ monthlyUsed: 0, monthlyLimit: 1000, extra: 0, isTrial: true, low: false, exhausted: false, canBuyPack: false });
+    expect(a.credits).toMatchObject({ monthlyUsed: 0, monthlyLimit: 1000, extra: 0, isTrial: true, low: false, exhausted: false, canBuyPack: true });
     expect(Date.parse(a.credits!.resetsAt)).toBe(end * 1000);
   });
 
-  it("gives Pro 2,000 credits a billing period, starting fresh each period", async () => {
-    const { app, s, start, end } = await subscribed("active");
+  it("gives a monthly subscriber 2,000 credits a billing period, starting fresh each period", async () => {
+    const { app, s, start, end } = await subscribed("active", undefined, { interval: "month" });
     // Use from the period before doesn't count.
     await db()`insert into allowances (account_id, period_start, limit_micros, used_micros)
       values (${s.account.id}, ${new Date((start - 30 * DAY) * 1000)}, 13333333, 13333333)`;
@@ -117,6 +125,118 @@ describe("credits on GET /account", () => {
     expect(a.entitlement.source).toBe("stripe");
     expect(a.credits).toMatchObject({ monthlyUsed: 0, monthlyLimit: 2000, isTrial: false, canBuyPack: true, left: 2000 });
     expect(Date.parse(a.credits!.resetsAt)).toBe(end * 1000);
+  });
+});
+
+describe("yearly subscriptions", () => {
+  it("get 2,000 credits every month of the year, not 2,000 for the year", async () => {
+    // Billing year started 40 days ago: the account is in the second monthly slice.
+    const start = now() - 40 * DAY;
+    const { app, s, upstream } = await subscribed("active", undefined, { interval: "year", start, end: start + 365 * DAY });
+    const { addMonths } = await import("../src/billing/credits.js");
+    const sliceStart = addMonths(new Date(start * 1000), 1);
+    const sliceEnd = addMonths(new Date(start * 1000), 2);
+
+    // Everything was used in the first month; it doesn't carry over.
+    await db()`insert into allowances (account_id, period_start, limit_micros, used_micros)
+      values (${s.account.id}, ${new Date(start * 1000)}, 13333333, 13333333)`;
+    let a = await account(app, s.accessToken);
+    expect(a.entitlement).toMatchObject({ source: "stripe", interval: "year", expiresAt: new Date((start + 365 * DAY) * 1000).toISOString() });
+    expect(a.credits).toMatchObject({ monthlyUsed: 0, monthlyLimit: 2000, left: 2000 });
+    expect(a.credits!.resetsAt).toBe(sliceEnd.toISOString());
+
+    upstream.events = textReply("x", { input: 0, output: 25_000 }); // 75 credits
+    await readSse(await turn(app, s.accessToken));
+    a = await account(app, s.accessToken);
+    expect(a.credits).toMatchObject({ monthlyUsed: 75, left: 1925 });
+    const [row] = await db()<{ period_start: Date }[]>`
+      select period_start from allowances where account_id = ${s.account.id} order by period_start desc limit 1`;
+    expect(row!.period_start.toISOString()).toBe(sliceStart.toISOString());
+  });
+
+  it("split the year into calendar months, clamping the day to short months", async () => {
+    const { monthlySlice, addMonths } = await import("../src/billing/credits.js");
+    const start = new Date("2026-01-31T10:00:00Z");
+    const end = new Date("2027-01-31T10:00:00Z");
+    expect(addMonths(start, 1).toISOString()).toBe("2026-02-28T10:00:00.000Z");
+    expect(addMonths(start, 2).toISOString()).toBe("2026-03-31T10:00:00.000Z");
+    expect(monthlySlice(start, end, new Date("2026-01-31T12:00:00Z"))).toEqual({ start, end: new Date("2026-02-28T10:00:00Z") });
+    expect(monthlySlice(start, end, new Date("2026-03-15T00:00:00Z"))).toEqual({
+      start: new Date("2026-02-28T10:00:00Z"),
+      end: new Date("2026-03-31T10:00:00Z"),
+    });
+    // The last slice ends with the billing period.
+    expect(monthlySlice(start, end, new Date("2027-01-20T00:00:00Z"))).toEqual({ start: new Date("2026-12-31T10:00:00Z"), end });
+  });
+});
+
+describe("a failed payment (past_due)", () => {
+  it("keeps Pro but gives no new monthly credits until Stripe collects", async () => {
+    const billing = new FakeBilling();
+    const { app, s, subId, customer, start, end } = await subscribed("past_due", billing, { interval: "month" });
+    let a = await account(app, s.accessToken);
+    expect(a.entitlement).toMatchObject({ tier: "pro", source: "stripe" });
+    expect(a.credits).toMatchObject({ monthlyLimit: 0, left: 0, exhausted: true });
+    const res = await turn(app, s.accessToken);
+    expect(res.status).toBe(402);
+    expect(((await res.json()) as { error: { details: Record<string, unknown> } }).error.details).toMatchObject({ paymentFailed: true });
+
+    // The retry succeeds: the same period now has its 2,000 credits.
+    billing.subscriptions.set(subId, subscription(subId, customer, s.account.id, "active", { start, end, interval: "month" }));
+    await deliver(app, event("invoice.paid", { id: "in_1", object: "invoice", subscription: subId }));
+    a = await account(app, s.accessToken);
+    expect(a.credits).toMatchObject({ monthlyLimit: 2000, left: 2000 });
+  });
+
+  it("after a trial gives no paid-period credits when the first charge fails", async () => {
+    const billing = new FakeBilling();
+    const { app, s, subId, customer } = await subscribed("trialing", billing);
+    const started = now();
+    billing.afterTrial = () =>
+      subscription(subId, customer, s.account.id, "past_due", { start: started, end: started + 30 * DAY, interval: "month" });
+    const res = await post(app, s.accessToken, "/v1/billing/trial/end");
+    const body = (await res.json()) as { entitlement: { paymentFailed: boolean }; credits: Credits };
+    expect(body.entitlement.paymentFailed).toBe(true);
+    expect(body.credits).toMatchObject({ monthlyLimit: 0, left: 0, isTrial: false });
+  });
+
+  it("still lets pack credits be used", async () => {
+    const { app, s } = await subscribed("past_due", undefined, { interval: "month" });
+    await deliver(app, packPaid(s.account.id, `pi_pd_${s.account.id.slice(0, 6)}`));
+    expect((await account(app, s.accessToken)).credits).toMatchObject({ monthlyLimit: 0, extra: 1000, exhausted: false });
+    expect((await turn(app, s.accessToken)).status).toBe(200);
+  });
+});
+
+describe("one subscription per account", () => {
+  it("cancels a second subscription that goes live on the same account", async () => {
+    const billing = new FakeBilling();
+    const { app, s, customer, subId } = await subscribed("trialing", billing);
+    const dup = `${subId}_dup`;
+    const start = now();
+    billing.subscriptions.set(dup, subscription(dup, customer, s.account.id, "trialing", { start, end: start + 15 * DAY, trialEnd: start + 15 * DAY }));
+    expect((await deliver(app, event("customer.subscription.created", { id: dup }))).status).toBe(200);
+    expect(billing.cancelled).toEqual([dup]);
+    const rows = await db()<{ stripe_subscription_id: string; status: string }[]>`
+      select stripe_subscription_id, status from subscriptions where account_id = ${s.account.id} order by stripe_subscription_id`;
+    expect(rows).toEqual([
+      { stripe_subscription_id: subId, status: "trialing" },
+      { stripe_subscription_id: dup, status: "canceled" },
+    ]);
+    expect((await account(app, s.accessToken)).entitlement).toMatchObject({ tier: "pro", source: "trial" });
+    // The cancel event that follows changes nothing and cancels nothing more.
+    expect((await deliver(app, event("customer.subscription.deleted", { id: dup }))).status).toBe(200);
+    expect(billing.cancelled).toEqual([dup]);
+  });
+
+  it("expires the earlier open Checkout when checkout is started again", async () => {
+    const billing = new FakeBilling();
+    const { app } = makeApp({ billing });
+    const s = await signIn(app, undefined, undefined, null);
+    expect((await post(app, s.accessToken, "/v1/billing/checkout", { interval: "month" })).status).toBe(200);
+    expect((await post(app, s.accessToken, "/v1/billing/checkout", { interval: "month" })).status).toBe(200);
+    expect(billing.expiredCheckouts).toBe(1);
+    expect([...billing.openCheckouts.values()]).toEqual([1]);
   });
 });
 
@@ -151,29 +271,31 @@ describe("POST /billing/trial/end", () => {
 });
 
 describe("credit packs", () => {
-  it("lists the pack and the trial on /billing/plans", async () => {
+  it("lists the pack and no trial on /billing/plans", async () => {
     const { app } = makeApp();
     const s = await signIn(app, undefined, undefined, null);
     const body = (await (await app.request("/v1/billing/plans", { headers: authed(s.accessToken) })).json()) as Record<string, unknown>;
     expect(body).toMatchObject({
-      trialDays: 15,
+      trialDays: 0,
       trialCredits: 1000,
       monthlyCredits: 2000,
       pack: { credits: 1000, amount: 1000, currency: "usd" },
     });
   });
 
-  it("can't be bought on Free or during a trial", async () => {
+  it("can't be bought on Free", async () => {
     const { app } = makeApp();
     const free = await signIn(app, undefined, undefined, null);
     const res = await post(app, free.accessToken, "/v1/billing/packs/checkout");
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("plan_required");
+  });
 
+  it("can be bought during a trial that started before the Free tier", async () => {
     const trial = await subscribed("trialing");
     const t = await post(trial.app, trial.s.accessToken, "/v1/billing/packs/checkout");
-    expect(t.status).toBe(409);
-    expect(((await t.json()) as { error: { code: string } }).error.code).toBe("packs_unavailable_during_trial");
+    expect(t.status).toBe(200);
+    expect(await t.json()).toEqual({ url: "https://checkout.stripe.com/c/pay/pack" });
   });
 
   it("opens a one-time checkout for Pro that returns to the app", async () => {

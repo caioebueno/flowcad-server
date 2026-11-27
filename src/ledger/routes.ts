@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv, Deps } from "../deps.js";
 import { ApiError } from "../errors.js";
-import { monthOf, projectHash } from "./ledger.js";
+import { IN_FLIGHT, monthOf, projectHash } from "./ledger.js";
 import { revokeDevice } from "../auth/tokens.js";
 import { canBuyPack, entitlementFor } from "../billing/entitlement.js";
 import { creditBalance, creditPeriod, creditsSummary, isExhausted, isLow, microsPerCredit } from "../billing/credits.js";
@@ -127,6 +127,7 @@ export function accountRoutes(deps: Deps) {
              sum(cost_micros)::bigint as cost
       from usage_ledger
       where account_id = ${accountId} and created_at >= ${from}::timestamptz and created_at < ${toExclusive}::timestamptz
+        and stop_reason is distinct from ${IN_FLIGHT}
       group by 1 order by 1`;
 
     const labels = new Map<string, string>();

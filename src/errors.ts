@@ -9,6 +9,9 @@ export type ErrorCode =
   | "refresh_token_invalid"
   | "code_invalid"
   | "email_taken"
+  | "sso_unavailable"
+  | "sso_not_configured"
+  | "sso_failed"
   | "plan_required"
   | "already_subscribed"
   | "billing_unavailable"
@@ -28,6 +31,9 @@ export type ErrorCode =
   | "upstream_error"
   | "upstream_unavailable"
   | "search_unavailable"
+  | "storage_full"
+  | "storage_error"
+  | "hash_mismatch"
   | "internal";
 
 export class ApiError extends Error {

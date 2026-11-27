@@ -62,14 +62,61 @@ describe("refresh and logout", () => {
     expect((await app.request("/v1/account", { headers: authed(next.accessToken) })).status).toBe(200);
   });
 
-  it("revokes the device when an old refresh token is reused", async () => {
+  it("revokes the device when an old refresh token is reused after its replacement was used", async () => {
     const s = await signIn(app);
     const first = (await (await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).json()) as { refreshToken: string };
+    const second = (await (await post("/v1/auth/refresh", { refreshToken: first.refreshToken })).json()) as { refreshToken: string };
     const reuse = await post("/v1/auth/refresh", { refreshToken: s.refreshToken });
     expect(reuse.status).toBe(401);
     // The newer token and the access token die with the device.
-    expect((await post("/v1/auth/refresh", { refreshToken: first.refreshToken })).status).toBe(401);
+    expect((await post("/v1/auth/refresh", { refreshToken: second.refreshToken })).status).toBe(401);
     expect((await app.request("/v1/account", { headers: authed(s.accessToken) })).status).toBe(401);
+  });
+
+  it("revokes the device when a rotated token comes back after the grace window", async () => {
+    const s = await signIn(app);
+    const first = (await (await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).json()) as { refreshToken: string };
+    await db()`update refresh_tokens set revoked_at = now() - interval '2 minutes' where device_id = ${s.deviceId} and replaced_by is not null`;
+    expect((await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).status).toBe(401);
+    expect((await post("/v1/auth/refresh", { refreshToken: first.refreshToken })).status).toBe(401);
+  });
+
+  it("keeps the user signed in when two refreshes with the same token race", async () => {
+    const s = await signIn(app);
+    const results = await Promise.all([1, 2].map(() => post("/v1/auth/refresh", { refreshToken: s.refreshToken })));
+    expect(results.map((r) => r.status)).toEqual([200, 200]);
+    const tokens = (await Promise.all(results.map((r) => r.json()))) as { refreshToken: string; accessToken: string }[];
+    // Both new tokens work, and the device is still signed in.
+    for (const t of tokens) {
+      expect((await post("/v1/auth/refresh", { refreshToken: t.refreshToken })).status).toBe(200);
+      expect((await app.request("/v1/account", { headers: authed(t.accessToken) })).status).toBe(200);
+    }
+  });
+
+  it("bounds the extra tokens in the grace window: one repeat too many counts as reuse", async () => {
+    const s = await signIn(app);
+    const first = (await (await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).json()) as { refreshToken: string };
+    for (let i = 0; i < 8; i++) expect((await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).status).toBe(200);
+    expect((await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).status).toBe(401);
+    // A chain started from a stolen token is caught: the whole device is signed out.
+    expect((await post("/v1/auth/refresh", { refreshToken: first.refreshToken })).status).toBe(401);
+  });
+
+  it("lets five refreshes that race all succeed", async () => {
+    const s = await signIn(app);
+    const results = await Promise.all(Array.from({ length: 5 }, () => post("/v1/auth/refresh", { refreshToken: s.refreshToken })));
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+    const tokens = (await Promise.all(results.map((r) => r.json()))) as { refreshToken: string }[];
+    for (const t of tokens) expect((await post("/v1/auth/refresh", { refreshToken: t.refreshToken })).status).toBe(200);
+  });
+
+  it("keeps the user signed in when a refresh is retried after a lost response", async () => {
+    const s = await signIn(app);
+    expect((await post("/v1/auth/refresh", { refreshToken: s.refreshToken })).status).toBe(200); // response "lost"
+    const retry = await post("/v1/auth/refresh", { refreshToken: s.refreshToken });
+    expect(retry.status).toBe(200);
+    const next = (await retry.json()) as { refreshToken: string };
+    expect((await post("/v1/auth/refresh", { refreshToken: next.refreshToken })).status).toBe(200);
   });
 
   it("logout revokes this device's tokens", async () => {

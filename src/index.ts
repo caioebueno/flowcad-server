@@ -15,6 +15,11 @@ import { consoleMailer, disabledMailer, ResendMailer } from "./auth/mailer.js";
 import { StripeGateway } from "./billing/stripe.js";
 import { BraveSearch, CombinedSearch, GitHubStepSearch, SearxngSearch, type SearchProvider } from "./search/provider.js";
 
+import { PostgresBlobStore, S3BlobStore } from "./storage/blobStore.js";
+
+import { WorkOSProvider } from "./auth/sso.js";
+
+
 const env = loadEnv();
 const sql = connect(env.DATABASE_URL);
 
@@ -38,6 +43,7 @@ const billing =
         automaticTax: env.STRIPE_AUTOMATIC_TAX === "true",
       })
     : null;
+if (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID) log.warn("sso_disabled", { reason: "WORKOS_API_KEY or WORKOS_CLIENT_ID not set" });
 if (!billing) log.warn("billing_disabled", { reason: "STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET not set" });
 
 const app = createApp({
@@ -57,8 +63,20 @@ const app = createApp({
       ? disabledMailer
       : consoleMailer,
   billing,
+  sso: env.WORKOS_API_KEY && env.WORKOS_CLIENT_ID ? new WorkOSProvider(env.WORKOS_API_KEY, env.WORKOS_CLIENT_ID) : null,
+  ssoAppCallback: env.SSO_APP_CALLBACK,
   publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/$/, ""),
   search: searchProvider(),
+  blobs: env.S3_BUCKET
+    ? new S3BlobStore({
+        bucket: env.S3_BUCKET,
+        region: env.S3_REGION,
+        endpoint: env.S3_ENDPOINT,
+        accessKeyId: env.S3_ACCESS_KEY_ID!,
+        secretAccessKey: env.S3_SECRET_ACCESS_KEY!,
+      })
+    : new PostgresBlobStore(sql),
+  storage: { quotaBytes: env.STORAGE_QUOTA_BYTES, maxBlobBytes: env.BLOB_MAX_BYTES },
 });
 
 function searchProvider(): SearchProvider | null {
