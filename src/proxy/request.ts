@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EFFORT_LEVELS, TASK_TYPES, effortRank, type ConfigDoc, type TaskProfile, type TaskType } from "../config/schema.js";
+import { EFFORT_LEVELS, TASK_TYPES, TIERS, baseTaskType, effortRank, type ConfigDoc, type TaskProfile, type TaskType } from "../config/schema.js";
 import { ApiError, outsideProfile } from "../errors.js";
 import { toolHash } from "./toolHash.js";
 
@@ -63,6 +63,10 @@ export const TurnBody = z.strictObject({
   /** Lower the depth within the profile. Never above the profile. */
   effort: z.enum(EFFORT_LEVELS).optional(),
   maxOutputTokens: z.number().int().positive().optional(),
+  /** The ladder rung the app asks for. Ignored unless the config's routing.tiers is on. */
+  tier: z.enum(TIERS).optional(),
+  /** Set when this run restarts a task one tier up; the tier it moved up from. */
+  escalatedFrom: z.enum(TIERS).optional(),
   request: ModelRequest,
 });
 export type TurnBody = z.infer<typeof TurnBody>;
@@ -116,7 +120,7 @@ export function checkAgainstProfile(body: TurnBody, config: ConfigDoc): TaskProf
     throw outsideProfile("Max output above the profile maximum", { max: profile.maxOutputTokens });
   }
 
-  const allow = config.toolAllowlist[body.taskType];
+  const allow = config.toolAllowlist[body.taskType] ?? config.toolAllowlist[baseTaskType(body.taskType as TaskType)];
   if (allow || config.enforceToolAllowlist) {
     for (const tool of body.request.tools ?? []) {
       const expected = allow?.[tool.name];

@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { BetaUsage } from "@anthropic-ai/sdk/resources/beta/messages/messages";
-import { SELF_HOSTED_PREFIX, type ConfigDoc, type TaskProfile, type TaskType } from "../config/schema.js";
+import { baseTaskType, SELF_HOSTED_PREFIX, type ConfigDoc, type TaskProfile, type TaskType } from "../config/schema.js";
 import type { Plan } from "../billing/plans.js";
 import type { ModelRequest } from "./request.js";
 import { mapUpstreamError, type StreamEvent, type Upstream, type UpstreamParams } from "./upstream.js";
@@ -42,8 +42,20 @@ export function selfHostedProfile(config: ConfigDoc, plan: Plan, taskType: strin
   const sh = config.selfHosted;
   if (!sh?.enabled) return null;
   if (sh.plans && !sh.plans.includes(plan.id)) return null;
-  const profile = sh.taskProfiles[taskType as TaskType];
+  const profile = sh.taskProfiles[taskType as TaskType] ?? sh.taskProfiles[baseTaskType(taskType as TaskType)];
   return profile?.mode === "live" ? profile : null;
+}
+
+/** When each self-hosted upstream may be tried again after it failed to start a turn. */
+const downUntil = new WeakMap<object, number>();
+
+/** Skip the self-hosted model for `seconds`, so turns go straight to Claude instead of each waiting for it. */
+export function markSelfHostedDown(upstream: object, seconds: number, now = Date.now()) {
+  if (seconds > 0) downUntil.set(upstream, now + seconds * 1000);
+}
+
+export function selfHostedIsDown(upstream: object, now = Date.now()): boolean {
+  return (downUntil.get(upstream) ?? 0) > now;
 }
 
 /**
