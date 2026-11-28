@@ -13,6 +13,7 @@ import { log } from "./logger.js";
 import { EmailCodes } from "./auth/emailCodes.js";
 import { consoleMailer, disabledMailer, ResendMailer } from "./auth/mailer.js";
 import { StripeGateway } from "./billing/stripe.js";
+import { BraveSearch, CombinedSearch, GitHubStepSearch, SearxngSearch, type SearchProvider } from "./search/provider.js";
 
 import { PostgresBlobStore, S3BlobStore } from "./storage/blobStore.js";
 
@@ -65,6 +66,7 @@ const app = createApp({
   sso: env.WORKOS_API_KEY && env.WORKOS_CLIENT_ID ? new WorkOSProvider(env.WORKOS_API_KEY, env.WORKOS_CLIENT_ID) : null,
   ssoAppCallback: env.SSO_APP_CALLBACK,
   publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/$/, ""),
+  search: searchProvider(),
   blobs: env.S3_BUCKET
     ? new S3BlobStore({
         bucket: env.S3_BUCKET,
@@ -76,6 +78,17 @@ const app = createApp({
     : new PostgresBlobStore(sql),
   storage: { quotaBytes: env.STORAGE_QUOTA_BYTES, maxBlobBytes: env.BLOB_MAX_BYTES },
 });
+
+function searchProvider(): SearchProvider | null {
+  const web = env.SEARXNG_URL ? new SearxngSearch(env.SEARXNG_URL) : env.BRAVE_SEARCH_API_KEY ? new BraveSearch(env.BRAVE_SEARCH_API_KEY) : null;
+  // GitHub first: its hits are files Keel can import straight away.
+  const providers = [env.GITHUB_SEARCH_TOKEN ? new GitHubStepSearch(env.GITHUB_SEARCH_TOKEN) : null, web].filter((p) => p !== null);
+  if (providers.length === 0) {
+    log.warn("search_disabled", { reason: "SEARXNG_URL, BRAVE_SEARCH_API_KEY and GITHUB_SEARCH_TOKEN not set" });
+    return null;
+  }
+  return providers.length === 1 ? providers[0]! : new CombinedSearch(providers);
+}
 
 const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, (info) =>
   log.info("listening", { port: info.port }),

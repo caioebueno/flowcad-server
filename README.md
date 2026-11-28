@@ -26,6 +26,7 @@ billing with AI credits and credit packs), plus remote config from phase 2.
 | `POST /billing/stripe/webhook` | Done. Signature checked, each event applied once, the only thing that moves an account between Free and Pro |
 | Pro gating | Done. Free accounts get `403 plan_required` from the agent; `GET /account` returns `entitlement` |
 | `POST /agent/turn`, `/agent/keepwarm` | Done. Task profiles, request checks, run caps, streaming, `keel.usage` / `keel.warning` / `keel.error` events |
+| `POST /search/step-models` | Done. The agent's `search_step_models`: SearXNG (or Brave) web search, plus GitHub code search, over the sites in `stepSearch`, Pro only, 60 searches an hour, answers cached an hour. See below |
 | `GET /usage`, `GET /account`, device list and revoke | Done. Usage shown in credits, never dollars |
 | `GET /config` | Done. Versioned in `config_versions`, served with an ETag |
 | AI credits | Done. 2,000 a billing period on Pro, 1,000 for the trial, packs used after; `credits_low` warning at 20% left, `402 credits_exhausted` at zero. Contract: `/mnt/project-files/keel-account-service/api-pro-and-credits.md` |
@@ -87,6 +88,7 @@ in-flight streams 300 seconds to finish when a deploy replaces an instance.
    - `WORKOS_API_KEY` and `WORKOS_CLIENT_ID` for Single Sign-On (in WorkOS, add `PUBLIC_BASE_URL/v1/auth/sso/callback` as a redirect URI), and optionally `SSO_APP_CALLBACK` (default `keel://auth/sso`)
    - `RESEND_API_KEY` and `EMAIL_FROM` (for example `Keel <signin@yourdomain.com>`, on a domain verified in Resend)
    - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTH`, `STRIPE_PRICE_YEAR`, `STRIPE_PRICE_PACK`, and optionally `STRIPE_AUTOMATIC_TAX=true`
+   - For the agent's STEP model search: `SEARXNG_URL`, the address of Keel's SearXNG service (its settings.yml must allow the `json` format), or else `BRAVE_SEARCH_API_KEY`; and optionally `GITHUB_SEARCH_TOKEN`, a GitHub token with public read access, which adds GitHub code search for `.step`/`.stp` files. With none of them the search answers 503 `search_unavailable`
    - For project files, add a **Bucket** to the Railway project (or use Cloudflare R2) and set
      `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from its
      credentials. Without them, files are stored in Postgres. `STORAGE_QUOTA_BYTES` and
@@ -135,6 +137,30 @@ on HTTP request duration before raising any profile above `high`.
 
 Errors before the stream starts are JSON with the status codes in the spec
 (401, 402, 403, 413, 422, 429, 502, 503). Errors mid stream arrive as `keel.error`.
+
+## STEP model search
+
+The agent can look for ready-made STEP models of standard and bought-in parts
+(fasteners, bearings, motors, extrusions). It is an ordinary custom tool,
+`search_step_models`, which the Mac answers by calling `POST /v1/search/step-models`
+with `{ "query": "608 2RS bearing", "limit": 5 }`. So it works the same on Claude and
+on the self-hosted model, and the turn still sends no server tools.
+
+The server adds the sites in `stepSearch.sites` to the query as `site:` operators,
+asks SearXNG (or Brave, when only its key is set), and, with `GITHUB_SEARCH_TOKEN`,
+GitHub code search for `.step`/`.stp` files at the same time, GitHub's first. A
+provider that fails is skipped. It keeps only https results on those sites, and answers
+`{ "results": [{ "title", "url", "fileUrl", "source", "snippet", "license" }] }`.
+`fileUrl` is set only for a `.step`/`.stp` page on a `direct` site (a GitHub blob
+becomes its raw.githubusercontent.com address, a GitLab blob its `/-/raw/` one); the
+catalogues (TraceParts, GrabCAD, McMaster-Carr...) need a sign-in, so they come back
+as pages only. The Mac downloads only a `fileUrl` from this answer, never an address
+the model wrote, and opens Keel's Import sheet on it.
+
+Change the sites, turn it off or change the hourly limit in remote config
+(`stepSearch`); a config published without `stepSearch` uses the bundled default.
+Queries are not stored: the log has their length and the result count. Searches
+cost no credits.
 
 ## Self-hosted model
 

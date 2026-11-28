@@ -38,6 +38,14 @@ const EnvSchema = z.object({
   /** Sent as "Authorization: Bearer": vLLM's --api-key, or the Vast.ai portal token. */
   SELF_HOSTED_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   /**
+   * Search for the agent's search_step_models: a SearXNG instance (preferred,
+   * JSON format on), else a Brave Search API key. GitHub code search is added
+   * when GITHUB_SEARCH_TOKEN is set. With none, the search answers 503.
+   */
+  SEARXNG_URL: z.preprocess((v) => (v === "" ? undefined : v), z.url().optional()),
+  GITHUB_SEARCH_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  BRAVE_SEARCH_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  /**
    * Project files. With S3_BUCKET set they go to that S3-compatible bucket
    * (Railway Buckets, Cloudflare R2, AWS S3); without it, to Postgres.
    */

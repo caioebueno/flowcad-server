@@ -15,6 +15,7 @@ import { EmailCodes } from "../src/auth/emailCodes.js";
 import type { Mailer } from "../src/auth/mailer.js";
 import type { BillingGateway, CheckoutInput, PackCheckoutInput } from "../src/billing/stripe.js";
 import Stripe from "stripe";
+import type { SearchProvider } from "../src/search/provider.js";
 
 import { PostgresBlobStore } from "../src/storage/blobStore.js";
 
@@ -224,6 +225,7 @@ export function makeApp(
     selfHosted?: FakeUpstream | null;
     mailer?: FakeMailer;
     billing?: FakeBilling | null;
+    search?: SearchProvider | null;
 
     storage?: { quotaBytes: number; maxBlobBytes: number };
 
@@ -250,6 +252,7 @@ export function makeApp(
     sso,
     ssoAppCallback: "keel://auth/sso",
     publicBaseUrl: "https://api.keel.test",
+    search: opts.search ?? null,
     blobs: new PostgresBlobStore(db()),
     storage: opts.storage ?? { quotaBytes: 50 * 1024 * 1024, maxBlobBytes: 10 * 1024 * 1024 },
   });

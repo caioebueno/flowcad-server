@@ -30,6 +30,7 @@ export type ErrorCode =
   | "rate_limited"
   | "upstream_error"
   | "upstream_unavailable"
+  | "search_unavailable"
   | "storage_full"
   | "storage_error"
   | "hash_mismatch"

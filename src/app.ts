@@ -9,6 +9,7 @@ import { billingPublicRoutes, billingRoutes } from "./billing/routes.js";
 import { requireAppVersion, requireAuth } from "./auth/middleware.js";
 import { proxyRoutes } from "./proxy/routes.js";
 import { accountRoutes } from "./ledger/routes.js";
+import { searchRoutes } from "./search/routes.js";
 import { projectRoutes } from "./projects/routes.js";
 import { log } from "./logger.js";
 import { appliedMigrations } from "./db/index.js";
@@ -94,6 +95,7 @@ export function createApp(deps: Deps) {
   authed.use("*", requireAuth(deps));
   authed.route("/agent", proxyRoutes(deps));
   authed.route("/billing", billingRoutes(deps));
+  authed.route("/search", searchRoutes(deps));
   authed.route("/account", linkEmailRoutes(deps));
   authed.route("/", accountRoutes(deps));
   authed.route("/", projectRoutes(deps));

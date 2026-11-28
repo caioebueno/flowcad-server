@@ -8,6 +8,7 @@ import type { PlanProvider } from "./billing/plans.js";
 import type { EmailCodes } from "./auth/emailCodes.js";
 import type { Mailer } from "./auth/mailer.js";
 import type { BillingGateway } from "./billing/stripe.js";
+import type { SearchProvider } from "./search/provider.js";
 
 import type { BlobStore } from "./storage/blobStore.js";
 
@@ -36,6 +37,8 @@ export interface Deps {
   /** Public https origin of this service, for Stripe's return pages and the SSO callback. */
   publicBaseUrl: string;
   projectHashSalt: string;
+  /** Web search for search_step_models; null or absent when no search key is set (503 search_unavailable). */
+  search?: SearchProvider | null;
   /** Bytes of synced project files (models, photos, datasheets, exports). */
   blobs: BlobStore;
   storage: StorageLimits;
