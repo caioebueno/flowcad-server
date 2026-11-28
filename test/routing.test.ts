@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { ConfigDocSchema, type ConfigDoc } from "../src/config/schema.js";
 import { ApiError } from "../src/errors.js";
+import { applyOverrides, ConfigStore } from "../src/config/store.js";
 import { buildParams, type StreamEvent } from "../src/proxy/upstream.js";
 import { effectiveTier, routeTurn, tierProfile } from "../src/proxy/routing.js";
 import { markSelfHostedDown, selfHostedIsDown } from "../src/proxy/selfHosted.js";
@@ -145,5 +146,21 @@ describe("tiered routing", () => {
     expect(upstream.calls).toHaveLength(0);
     const [row] = await db()`select tier from usage_ledger where run_id = ${body.runId}`;
     expect(row!.tier).toBeNull();
+  });
+
+  it("ROUTING_TIERS overrides the config's routing.tiers either way, and leaves it alone when unset", () => {
+    expect(applyOverrides(DEFAULT_CONFIG, { routingTiers: true }).routing!.tiers).toBe(true);
+    expect(applyOverrides(routingOn(), { routingTiers: false }).routing!.tiers).toBe(false);
+    expect(applyOverrides(routingOn(), {})).toEqual(routingOn());
+    const { routing: _r, ...older } = DEFAULT_CONFIG;
+    expect(applyOverrides(older as ConfigDoc, { routingTiers: true }).routing).toMatchObject({ tiers: true, mid: DEFAULT_CONFIG.routing!.mid });
+  });
+
+  it("the config store applies the override to the bundled defaults and changes the etag", async () => {
+    const plain = await new ConfigStore(db()).current();
+    const on = await new ConfigStore(db(), 30_000, { routingTiers: true }).current();
+    expect(on.version).toBe(plain.version);
+    expect(on.doc.routing!.tiers).toBe(true);
+    expect(on.etag).not.toBe(plain.etag);
   });
 });
