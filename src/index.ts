@@ -51,7 +51,9 @@ const app = createApp({
   apple: appleVerifier(env.APPLE_CLIENT_ID),
   attestation: env.APP_ATTEST_MODE === "enforce" ? attestationNotImplemented : attestationDisabled,
   accessTokens: new AccessTokens(env.ACCESS_TOKEN_SECRET),
-  config: new ConfigStore(sql),
+  config: new ConfigStore(sql, undefined, {
+    routingTiers: env.ROUTING_TIERS === undefined ? undefined : env.ROUTING_TIERS === "true",
+  }),
   upstream: new AnthropicUpstream(env.ANTHROPIC_API_KEY),
   selfHosted: env.SELF_HOSTED_BASE_URL ? new SelfHostedUpstream(env.SELF_HOSTED_BASE_URL, env.SELF_HOSTED_TOKEN) : null,
   plans: new ConfigPlanProvider(sql),

@@ -18,6 +18,18 @@ export interface ConfigSource {
 const etagOf = (version: number, doc: ConfigDoc) =>
   `"v${version}-${createHash("sha256").update(JSON.stringify(doc)).digest("hex").slice(0, 12)}"`;
 
+/** Settings from the environment that win over the published config. */
+export interface ConfigOverrides {
+  routingTiers?: boolean;
+}
+
+/** Applies environment overrides to a loaded config document. */
+export function applyOverrides(doc: ConfigDoc, overrides: ConfigOverrides = {}): ConfigDoc {
+  if (overrides.routingTiers === undefined) return doc;
+  const routing = doc.routing ?? DEFAULT_CONFIG.routing!;
+  return { ...doc, routing: { ...routing, tiers: overrides.routingTiers } };
+}
+
 export function staticConfig(doc: ConfigDoc = DEFAULT_CONFIG, version = 0): ConfigSource {
   const loaded = { version, doc, etag: etagOf(version, doc) };
   return { current: async () => loaded };
@@ -30,6 +42,7 @@ export class ConfigStore implements ConfigSource {
   constructor(
     private readonly sql: Sql,
     private readonly ttlMs = 30_000,
+    private readonly overrides: ConfigOverrides = {},
   ) {}
 
   async current(): Promise<LoadedConfig> {
@@ -38,7 +51,8 @@ export class ConfigStore implements ConfigSource {
       select version, doc from config_versions order by version desc limit 1`;
     let value: LoadedConfig;
     if (!row) {
-      value = { version: 0, doc: DEFAULT_CONFIG, etag: etagOf(0, DEFAULT_CONFIG) };
+      const doc = applyOverrides(DEFAULT_CONFIG, this.overrides);
+      value = { version: 0, doc, etag: etagOf(0, doc) };
     } else {
       const parsed = ConfigDocSchema.safeParse(row.doc);
       if (!parsed.success) {
@@ -46,9 +60,11 @@ export class ConfigStore implements ConfigSource {
         // never take the service down over it: keep serving the last good one.
         log.error("config_invalid", { version: row.version });
         if (this.cached) return this.cached.value;
-        value = { version: 0, doc: DEFAULT_CONFIG, etag: etagOf(0, DEFAULT_CONFIG) };
+        const doc = applyOverrides(DEFAULT_CONFIG, this.overrides);
+        value = { version: 0, doc, etag: etagOf(0, doc) };
       } else {
-        value = { version: row.version, doc: parsed.data, etag: etagOf(row.version, parsed.data) };
+        const doc = applyOverrides(parsed.data, this.overrides);
+        value = { version: row.version, doc, etag: etagOf(row.version, doc) };
       }
     }
     this.cached = { at: Date.now(), value };

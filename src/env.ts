@@ -30,6 +30,11 @@ const EnvSchema = z.object({
   STRIPE_PRICE_PACK: z.string().optional(),
   STRIPE_AUTOMATIC_TAX: z.enum(["true", "false"]).default("false"),
   /**
+   * Overrides the config's routing.tiers while set ("true" or "false"), so tiered
+   * routing can be switched without publishing a config. Unset, the config decides.
+   */
+  ROUTING_TIERS: z.preprocess((v) => (v === "" ? undefined : v), z.enum(["true", "false"]).optional()),
+  /**
    * Self-hosted model: vLLM's Anthropic-compatible endpoint (e.g. a Vast.ai
    * instance's vLLM API address, without /v1). Unset, every turn goes to Claude.
    * Must be https:// in production.
