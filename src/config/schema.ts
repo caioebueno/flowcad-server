@@ -15,8 +15,26 @@ export const TASK_TYPES = [
   "retry_high",
   "overnight_review",
   "chore",
+  // Routing (Nov 28): a typed message whose job the model's first move decides, and one part of a parts card.
+  "auto",
+  "build",
 ] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
+
+/**
+ * Task types added after configs were first published. A stored config
+ * without a profile for one of them uses its base type's, so publishing a
+ * new server never needs a config change first.
+ */
+export const BASE_TASK_TYPE: Partial<Record<TaskType, TaskType>> = { auto: "change", build: "change" };
+
+/** The type whose settings stand in for a task type the config doesn't list. */
+export const baseTaskType = (t: TaskType): TaskType => BASE_TASK_TYPE[t] ?? t;
+
+/** The rungs of the model ladder: cheap is the self-hosted model, mid and top are Claude models. */
+export const TIERS = ["cheap", "mid", "top"] as const;
+export type Tier = (typeof TIERS)[number];
+export const tierRank = (t: Tier) => TIERS.indexOf(t);
 
 export const TaskProfileSchema = z.strictObject({
   model: z.string(),
@@ -95,8 +113,37 @@ export const StepSearchSchema = z.strictObject({
 });
 export type StepSearch = z.infer<typeof StepSearchSchema>;
 
+/** Copies a base type's profile into each newer task type a stored config doesn't list. */
+function fillNewTaskTypes(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const profiles = { ...(value as Record<string, unknown>) };
+  for (const [type, base] of Object.entries(BASE_TASK_TYPE)) {
+    if (profiles[type] === undefined && profiles[base] !== undefined) profiles[type] = profiles[base];
+  }
+  return profiles;
+}
+
+/**
+ * Tiered routing (Keel AI Routing guide, Nov 28). The app sends a tier with
+ * each turn; `tiers` off means the server ignores it and routes as before.
+ * `ladder` and `cacheOrder` are read by the app.
+ */
+export const RoutingSchema = z.strictObject({
+  tiers: z.boolean(),
+  ladder: z.boolean(),
+  cacheOrder: z.boolean(),
+  /** Claude model and effort for the mid and top tiers; output cap, budget and thinking stay the task type's. */
+  mid: z.strictObject({ model: z.string(), effort: z.enum(EFFORT_LEVELS) }),
+  top: z.strictObject({ model: z.string(), effort: z.enum(EFFORT_LEVELS) }),
+  /** The lowest tier a task type runs at, whatever the app sends. Raised here when the cheap tier fails it too often. */
+  floors: z.partialRecord(z.enum(TASK_TYPES), z.enum(TIERS)).default({}),
+  /** Seconds the self-hosted model is skipped after it fails to start a turn, so turns don't each wait for it. */
+  selfHostedCooldownSeconds: z.number().int().nonnegative().default(60),
+});
+export type Routing = z.infer<typeof RoutingSchema>;
+
 export const ConfigDocSchema = z.strictObject({
-  taskProfiles: z.record(z.enum(TASK_TYPES), TaskProfileSchema),
+  taskProfiles: z.preprocess(fillNewTaskTypes, z.record(z.enum(TASK_TYPES), TaskProfileSchema)),
   prices: z.record(z.string(), ModelPriceSchema),
   plans: z.record(z.string(), PlanSchema),
   /**
@@ -144,5 +191,7 @@ export const ConfigDocSchema = z.strictObject({
   selfHosted: SelfHostedSchema.optional(),
   /** The bundled default when absent, so a config published before it still searches. */
   stepSearch: StepSearchSchema.optional(),
+  /** Off when absent: the tier the app sends is ignored. */
+  routing: RoutingSchema.optional(),
 });
 export type ConfigDoc = z.infer<typeof ConfigDocSchema>;

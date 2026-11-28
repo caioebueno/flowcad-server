@@ -20,6 +20,10 @@ export interface LedgerRow {
   stopReason: string | null;
   latencyMs: number;
   configVersion: number;
+  /** Routing (migration 006): the tier that served the turn, the last tool called, and the tier a moved-up run came from. */
+  tier?: string | null;
+  toolCalled?: string | null;
+  escalatedFrom?: string | null;
 }
 
 /** The server never stores the app's project id, only a keyed hash of it. */
@@ -80,7 +84,8 @@ export async function recordUsage(
             input_tokens = ${row.inputTokens}, cache_write_tokens = ${row.cacheWriteTokens},
             cache_read_tokens = ${row.cacheReadTokens}, output_tokens = ${row.outputTokens},
             cost_micros = ${row.costMicros}, extra_micros = ${fromExtra}, stop_reason = ${row.stopReason},
-            latency_ms = ${row.latencyMs}, config_version = ${row.configVersion}
+            latency_ms = ${row.latencyMs}, config_version = ${row.configVersion},
+            tier = ${row.tier ?? null}, tool_called = ${row.toolCalled ?? null}, escalated_from = ${row.escalatedFrom ?? null}
           where id = ${reservationId} and account_id = ${row.accountId} and stop_reason = ${IN_FLIGHT}
           returning id`
       : [];
@@ -89,12 +94,12 @@ export async function recordUsage(
         insert into usage_ledger (
           account_id, device_id, project_hash, thread_id, run_id, turn_index, task_type, kind, model, served_model,
           input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_micros, extra_micros, stop_reason,
-          latency_ms, config_version
+          latency_ms, config_version, tier, tool_called, escalated_from
         ) values (
           ${row.accountId}, ${row.deviceId}, ${row.projectHash}, ${row.threadId}, ${row.runId}, ${row.turnIndex},
           ${row.taskType}, ${row.kind}, ${row.model}, ${row.servedModel}, ${row.inputTokens}, ${row.cacheWriteTokens},
           ${row.cacheReadTokens}, ${row.outputTokens}, ${row.costMicros}, ${fromExtra}, ${row.stopReason}, ${row.latencyMs},
-          ${row.configVersion}
+          ${row.configVersion}, ${row.tier ?? null}, ${row.toolCalled ?? null}, ${row.escalatedFrom ?? null}
         )`;
     }
     const [g] = await tx<{ remaining: number }[]>`

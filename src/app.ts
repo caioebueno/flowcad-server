@@ -16,7 +16,7 @@ import { appliedMigrations } from "./db/index.js";
 import Stripe from "stripe";
 
 /** Bump when adding a file to migrations/. The health check fails until all are applied. */
-export const EXPECTED_MIGRATIONS = 5;
+export const EXPECTED_MIGRATIONS = 6;
 
 export function createApp(deps: Deps) {
   const app = new Hono<AppEnv>();

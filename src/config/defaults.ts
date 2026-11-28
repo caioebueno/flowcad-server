@@ -8,6 +8,23 @@ const opus = (p: Pick<TaskProfile, "effort" | "maxOutputTokens" | "taskBudgetTok
   ...p,
 });
 
+const sonnet = (p: Pick<TaskProfile, "effort" | "maxOutputTokens" | "taskBudgetTokens">): TaskProfile => ({
+  model: "claude-sonnet-5-5",
+  thinkingUpdates: true,
+  refusalFallback: true,
+  mode: "live",
+  ...p,
+});
+
+/** Haiku 5.5 has no "updates" thinking display and no server-side refusal fallback. */
+const haiku = (p: Pick<TaskProfile, "effort" | "maxOutputTokens" | "taskBudgetTokens">): TaskProfile => ({
+  model: "claude-haiku-5-5",
+  thinkingUpdates: false,
+  refusalFallback: false,
+  mode: "live",
+  ...p,
+});
+
 /**
  * Qwen3.8-27B (FP8) on vLLM. Effort and budgets don't apply there; on a
  * self-hosted profile `thinkingUpdates` switches the model's thinking on.
@@ -49,6 +66,10 @@ export const DEFAULT_CONFIG: ConfigDoc = {
       refusalFallback: false, // Haiku has no server-side fallback
       mode: "live",
     },
+    // Routing (Nov 28). Used only by app builds that send them; the Claude
+    // profile here is what serves the cheap tier while the GPU is off.
+    auto: haiku({ effort: "medium", maxOutputTokens: 32_000, taskBudgetTokens: 60_000 }),
+    build: sonnet({ effort: "low", maxOutputTokens: 32_000, taskBudgetTokens: 60_000 }),
   },
   // USD per million tokens. Cache writes: 1.25x input (5 minute), 2x input (1 hour).
   // Fallback models are listed so a fallback-served turn is priced correctly.
@@ -57,7 +78,7 @@ export const DEFAULT_CONFIG: ConfigDoc = {
     "claude-opus-5-5": { input: 4, output: 20, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2 },
     "claude-opus-5": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
     "claude-opus-4-8": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
-    "claude-sonnet-5-5": { input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2 },
+    "claude-sonnet-5-5": { input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.1 },
     "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01 },
     // Our own GPU, so not a per-token bill. Charged like Haiku to keep credits meaningful.
     [SELF_MODEL]: { input: 0.1, output: 0.5, cacheWrite5m: 0.1, cacheWrite1h: 0.1, cacheRead: 0.01 },
@@ -123,6 +144,19 @@ export const DEFAULT_CONFIG: ConfigDoc = {
       plan: self(16_000, true),
       retry_high: self(16_000, true),
       chore: self(1_000, false),
+      auto: self(16_000, false),
+      build: self(16_000, false),
     },
+  },
+  // Tiered routing (Keel AI Routing guide). Off until the app sends tiers and
+  // a config with these switched on is published.
+  routing: {
+    tiers: false,
+    ladder: false,
+    cacheOrder: false,
+    mid: { model: "claude-sonnet-5-5", effort: "medium" },
+    top: { model: "claude-opus-5-5", effort: "high" },
+    floors: {},
+    selfHostedCooldownSeconds: 60,
   },
 };

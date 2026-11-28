@@ -6,8 +6,9 @@ import { ApiError } from "../errors.js";
 import { requireAttestation } from "../auth/middleware.js";
 import { checkAgainstProfile, rejectServerTools, TurnBody } from "./request.js";
 import { buildParams, mapUpstreamError, type StreamEvent, type UpstreamParams } from "./upstream.js";
-import { dropSelfHostedThinking, selfHostedProfile } from "./selfHosted.js";
-import type { TaskProfile } from "../config/schema.js";
+import { dropSelfHostedThinking, markSelfHostedDown, selfHostedIsDown, selfHostedProfile } from "./selfHosted.js";
+import { routeTurn } from "./routing.js";
+import type { TaskProfile, Tier } from "../config/schema.js";
 import { priceUsage, StreamUsage, worstCaseMicros } from "./usage.js";
 import { heartbeatTurn, projectHash, recordUsage, releaseTurn, RESERVATION_HEARTBEAT_SECONDS, reserveTurn, type Reservation } from "../ledger/ledger.js";
 import { creditBalance, creditPeriod, creditsLeft, isExhausted, isLow, microsPerCredit, type CreditPeriod } from "../billing/credits.js";
@@ -35,6 +36,8 @@ interface Prepared {
   profile: ReturnType<typeof checkAgainstProfile>;
   /** Tried before `profile` when the self-hosted model is configured and on. */
   selfProfile: TaskProfile | null;
+  /** The ladder rung this turn runs at; null when tiered routing is off or the app sent none. */
+  tier: Tier | null;
 }
 
 /** Steps 1 to 3 of the proxy: size, shape, profile, plan and credits. */
@@ -58,7 +61,7 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
     throw new ApiError(400, "invalid_request", "Request body is invalid", { issues });
   }
   const body = parsed.data;
-  const profile = checkAgainstProfile(body, config.doc);
+  const typeProfile = checkAgainstProfile(body, config.doc);
 
   const { accountId } = c.get("auth");
   const plan = await deps.plans.planFor(accountId, config.doc);
@@ -68,8 +71,10 @@ async function prepare(c: Context<AppEnv>, deps: Deps): Promise<Prepared> {
   if (!period) throw new ApiError(403, "plan_required", "The agent is part of Keel Pro");
   const balance = await creditBalance(deps.sql, accountId, period);
   if (isExhausted(period, balance)) throw creditsExhausted(deps, period);
-  const selfProfile = deps.selfHosted ? selfHostedProfile(config.doc, plan, body.taskType) : null;
-  return { body, bodyBytes, config, plan, period, usedMicros: balance.monthlyUsedMicros, extraMicros: balance.extraMicros, profile, selfProfile };
+  // A self-hosted model that just failed to start a turn is skipped for a while, so turns don't each wait for it.
+  const selfUp = deps.selfHosted && !selfHostedIsDown(deps.selfHosted) ? selfHostedProfile(config.doc, plan, body.taskType) : null;
+  const { tier, profile, selfProfile } = routeTurn(config.doc, body, typeProfile, selfUp);
+  return { body, bodyBytes, config, plan, period, usedMicros: balance.monthlyUsedMicros, extraMicros: balance.extraMicros, profile, selfProfile, tier };
 }
 
 const creditsExhausted = (deps: Deps, period: CreditPeriod) =>
@@ -123,7 +128,7 @@ function paramsFor(profile: TaskProfile, body: TurnBody): UpstreamParams {
  */
 async function startTurn(
   deps: Deps,
-  prepared: Pick<Prepared, "body" | "profile" | "selfProfile">,
+  prepared: Pick<Prepared, "body" | "profile" | "selfProfile" | "config">,
   signal: AbortSignal,
   accountId: string,
 ): Promise<{ events: AsyncIterable<StreamEvent>; served: TaskProfile }> {
@@ -134,6 +139,8 @@ async function startTurn(
     } catch (err) {
       const code = err instanceof ApiError ? err.code : "unknown";
       log.warn("self_hosted_unavailable", { account: accountId, run: body.runId, code });
+      const routing = prepared.config.doc.routing;
+      if (routing?.tiers) markSelfHostedDown(deps.selfHosted, routing.selfHostedCooldownSeconds);
     }
   }
   const claudeBody = { ...body, request: dropSelfHostedThinking(body.request) };
@@ -274,6 +281,9 @@ export function proxyRoutes(deps: Deps) {
             stopReason,
             latencyMs,
             configVersion: config.version,
+            tier: prepared.tier,
+            toolCalled: usage.toolCalled,
+            escalatedFrom: body.escalatedFrom ?? null,
           },
           period,
           reservationId,
@@ -287,6 +297,8 @@ export function proxyRoutes(deps: Deps) {
           run: body.runId,
           turn: body.turnIndex,
           task: body.taskType,
+          tier: prepared.tier,
+          tool: usage.toolCalled,
           in: priced.inputTokens,
           out: priced.outputTokens,
           cost: priced.costMicros,
@@ -315,6 +327,7 @@ export function proxyRoutes(deps: Deps) {
             costMicros: priced.costMicros,
             servedModel: priced.servedModel,
             model: profile.model,
+            tier: prepared.tier,
             creditsCharged: creditsCharged(priced.costMicros, microsPerCredit(config.doc)),
             creditsLeft: left,
             resetsAt,

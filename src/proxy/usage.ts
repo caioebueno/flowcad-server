@@ -145,6 +145,8 @@ export class StreamUsage {
   private sawThinking = false;
   private firstAt: number | null = null;
   stopReason: string | null = null;
+  /** The name of the last tool the model called in this turn, if any. */
+  toolCalled: string | null = null;
 
   constructor(
     private readonly maxOutputTokens = Infinity,
@@ -159,8 +161,10 @@ export class StreamUsage {
   }) {
     if (this.firstAt === null) this.firstAt = this.clock();
     if (event.type === "message_start" && event.message?.usage) this.merge(event.message.usage);
-    if (event.type === "content_block_start" && (event as { content_block?: { type?: string } }).content_block?.type?.includes("thinking")) {
-      this.sawThinking = true;
+    if (event.type === "content_block_start") {
+      const block = (event as { content_block?: { type?: string; name?: string } }).content_block;
+      if (block?.type?.includes("thinking")) this.sawThinking = true;
+      if (block?.type === "tool_use" && typeof block.name === "string") this.toolCalled = block.name.slice(0, 128);
     }
     if (event.type === "content_block_delta" && event.delta) {
       const d = event.delta;

@@ -28,6 +28,14 @@ const BETA_TASK_BUDGETS = "task-budgets-2026-03-13";
 const BETA_THINKING_UPDATES = "thinking-display-updates-2026-08-18";
 const BETA_FALLBACK = "server-side-fallback-2026-07-01";
 
+/**
+ * Models that answer a forced tool_choice ("any" or "tool") with a 400,
+ * whether or not thinking is on (Opus 5.5, Sonnet 5.5, Fable 5.1 and 5.2).
+ */
+export function rejectsForcedTool(model: string): boolean {
+  return /^claude-(opus-5-5|sonnet-5-5|fable-5-[12]|mythos-5-[12])/.test(model);
+}
+
 /** Turns a checked request and its task profile into Messages API parameters. */
 export function buildParams(
   profile: TaskProfile,
@@ -52,7 +60,9 @@ export function buildParams(
   // to the model. The self-hosted model takes it: vLLM then constrains the
   // tool's arguments to its schema.
   const forced = req.tool_choice && req.tool_choice.type !== "auto";
-  if (req.tool_choice && req.tools?.length && (!forced || !profile.thinkingUpdates || profile.model.startsWith(SELF_HOSTED_PREFIX))) {
+  const selfHosted = profile.model.startsWith(SELF_HOSTED_PREFIX);
+  const forcedOk = selfHosted || (!profile.thinkingUpdates && !rejectsForcedTool(profile.model));
+  if (req.tool_choice && req.tools?.length && (!forced || forcedOk)) {
     params.tool_choice = req.tool_choice;
   }
   if (profile.thinkingUpdates) {
