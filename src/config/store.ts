@@ -60,6 +60,24 @@ export class ConfigStore implements ConfigSource {
   }
 }
 
+/**
+ * The config with `routing.tiers` forced on or off by the ROUTING_TIERS
+ * environment variable, whatever is published. Unset, the source is used as
+ * it is. A stopgap until the flag is published in `config_versions`; a doc
+ * without `routing` gets the bundled routing with the flag set.
+ */
+export function withRoutingTiers(source: ConfigSource, tiers: boolean | undefined): ConfigSource {
+  if (tiers === undefined) return source;
+  return {
+    async current() {
+      const loaded = await source.current();
+      if (loaded.doc.routing?.tiers === tiers) return loaded;
+      const doc: ConfigDoc = { ...loaded.doc, routing: { ...(loaded.doc.routing ?? DEFAULT_CONFIG.routing!), tiers } };
+      return { version: loaded.version, doc, etag: etagOf(loaded.version, doc) };
+    },
+  };
+}
+
 export async function publishConfig(sql: Sql, doc: unknown, author: string, note?: string): Promise<number> {
   const parsed = ConfigDocSchema.parse(doc);
   const [row] = await sql<{ version: number }[]>`

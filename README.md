@@ -89,6 +89,8 @@ in-flight streams 300 seconds to finish when a deploy replaces an instance.
    - `RESEND_API_KEY` and `EMAIL_FROM` (for example `Keel <signin@yourdomain.com>`, on a domain verified in Resend)
    - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTH`, `STRIPE_PRICE_YEAR`, `STRIPE_PRICE_PACK`, and optionally `STRIPE_AUTOMATIC_TAX=true`
    - For the agent's STEP model search: `SEARXNG_URL`, the address of Keel's SearXNG service (its settings.yml must allow the `json` format), or else `BRAVE_SEARCH_API_KEY`; and optionally `GITHUB_SEARCH_TOKEN`, a GitHub token with public read access, which adds GitHub code search for `.step`/`.stp` files. With none of them the search answers 503 `search_unavailable`
+   - Optionally `ROUTING_TIERS` = `true` (or `false`) to force `routing.tiers` on (or off) whatever
+     config is published, until the flag is published in `config_versions`
    - For project files, add a **Bucket** to the Railway project (or use Cloudflare R2) and set
      `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from its
      credentials. Without them, files are stored in Postgres. `STORAGE_QUOTA_BYTES` and

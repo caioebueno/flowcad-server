@@ -57,6 +57,11 @@ const EnvSchema = z.object({
   /** Blob bytes each account may keep (default 5 GB) and the largest single file (default 512 MB). */
   STORAGE_QUOTA_BYTES: z.coerce.number().int().positive().default(5 * 1024 ** 3),
   BLOB_MAX_BYTES: z.coerce.number().int().positive().default(512 * 1024 ** 2),
+  /**
+   * "true" or "false" forces the config's routing.tiers, whatever is published
+   * in config_versions. Unset or empty, the published config decides.
+   */
+  ROUTING_TIERS: z.preprocess((v) => (v === "" ? undefined : v), z.enum(["true", "false"]).optional()),
   /** App Attest is phase 2. "off" accepts requests without an assertion. */
   APP_ATTEST_MODE: z.enum(["off", "enforce"]).default("off"),
 });

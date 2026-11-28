@@ -5,7 +5,7 @@ import { createApp } from "./app.js";
 import { appleVerifier } from "./auth/apple.js";
 import { attestationDisabled, attestationNotImplemented } from "./auth/attest.js";
 import { AccessTokens } from "./auth/tokens.js";
-import { ConfigStore } from "./config/store.js";
+import { ConfigStore, withRoutingTiers } from "./config/store.js";
 import { AnthropicUpstream } from "./proxy/upstream.js";
 import { SelfHostedUpstream } from "./proxy/selfHosted.js";
 import { ConfigPlanProvider } from "./billing/plans.js";
@@ -43,6 +43,7 @@ const billing =
         automaticTax: env.STRIPE_AUTOMATIC_TAX === "true",
       })
     : null;
+if (env.ROUTING_TIERS) log.warn("routing_tiers_from_env", { tiers: env.ROUTING_TIERS });
 if (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID) log.warn("sso_disabled", { reason: "WORKOS_API_KEY or WORKOS_CLIENT_ID not set" });
 if (!billing) log.warn("billing_disabled", { reason: "STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET not set" });
 
@@ -51,7 +52,7 @@ const app = createApp({
   apple: appleVerifier(env.APPLE_CLIENT_ID),
   attestation: env.APP_ATTEST_MODE === "enforce" ? attestationNotImplemented : attestationDisabled,
   accessTokens: new AccessTokens(env.ACCESS_TOKEN_SECRET),
-  config: new ConfigStore(sql),
+  config: withRoutingTiers(new ConfigStore(sql), env.ROUTING_TIERS === undefined ? undefined : env.ROUTING_TIERS === "true"),
   upstream: new AnthropicUpstream(env.ANTHROPIC_API_KEY),
   selfHosted: env.SELF_HOSTED_BASE_URL ? new SelfHostedUpstream(env.SELF_HOSTED_BASE_URL, env.SELF_HOSTED_TOKEN) : null,
   plans: new ConfigPlanProvider(sql),
