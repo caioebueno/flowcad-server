@@ -76,6 +76,10 @@ describe("search providers", () => {
     const called = fetch.mock.calls[0]![0];
     expect(called.pathname).toBe("/search");
     expect(called.searchParams.get("format")).toBe("json");
+    vi.stubGlobal("fetch", answer({ results: [], unresponsive_engines: [["google cse", "Suspended: too many requests"]] }));
+    await expect(new SearxngSearch("https://searx.example").search("x", 5)).rejects.toThrow("searxng_engines_down: google cse");
+    vi.stubGlobal("fetch", answer({ results: [] }));
+    expect(await new SearxngSearch("https://searx.example").search("x", 5)).toEqual([]);
     vi.stubGlobal("fetch", answer({}, 403));
     await expect(new SearxngSearch("https://searx.example").search("x", 5)).rejects.toThrow("searxng_403");
   });

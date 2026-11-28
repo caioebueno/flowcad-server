@@ -72,6 +72,7 @@ export function searchRoutes(deps: Deps) {
       const found = await deps.search.search(buildQuery(query, settings.sites), Math.min(limit * 3, 20));
       results = toStepModels(found, settings.sites, limit);
     } catch (err) {
+      // The message names the engines that were down, never the query.
       log.warn("search_failed", { account: accountId, err: (err as Error).message });
       throw new ApiError(502, "upstream_error", "The search provider didn't answer");
     }

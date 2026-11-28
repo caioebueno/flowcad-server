@@ -53,7 +53,16 @@ export class SearxngSearch implements SearchProvider {
     url.searchParams.set("safesearch", "1");
     const res = await fetch(url, { headers: { Accept: "application/json" }, signal: signal ?? AbortSignal.timeout(15_000) });
     if (!res.ok) throw new Error(`searxng_${res.status}`);
-    const body = (await res.json()) as { results?: { title?: string; url?: string; content?: string }[] };
+    const body = (await res.json()) as {
+      results?: { title?: string; url?: string; content?: string }[];
+      unresponsive_engines?: [string, string][];
+    };
+    // No results because every engine was blocked (a CAPTCHA, "too many requests") isn't "nothing found":
+    // say so, or the agent tells the person the part doesn't exist online.
+    const down = body.unresponsive_engines ?? [];
+    if (!body.results?.length && down.length > 0) {
+      throw new Error(`searxng_engines_down: ${down.map(([name, why]) => `${name} (${why})`).join(", ")}`);
+    }
     return (body.results ?? [])
       .flatMap((r) => (r.title && r.url ? [{ title: r.title, url: r.url, description: r.content }] : []))
       .slice(0, count);

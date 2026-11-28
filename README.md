@@ -157,6 +157,12 @@ catalogues (TraceParts, GrabCAD, McMaster-Carr...) need a sign-in, so they come 
 as pages only. The Mac downloads only a `fileUrl` from this answer, never an address
 the model wrote, and opens Keel's Import sheet on it.
 
+SearXNG needs engines that answer from Railway's addresses. Google and DuckDuckGo
+block them quickly (a CAPTCHA, "too many requests"), so turn on others in its
+settings.yml too, such as Bing, Brave, Mojeek, Qwant and Startpage. When every
+engine is down and nothing comes back, the endpoint answers 502 `upstream_error`
+rather than an empty list, so the agent doesn't say the part isn't online.
+
 Change the sites, turn it off or change the hourly limit in remote config
 (`stepSearch`); a config published without `stepSearch` uses the bundled default.
 Queries are not stored: the log has their length and the result count. Searches
